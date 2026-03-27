@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bot-ml"
+version = "0.1.0"
+description = "Machine Learning modules for Bot Mk3"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.21",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "torch>=2.0",  # Assuming we use PyTorch as per plan
+    "polars>=0.20", # For fast data manipulation
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "isort",
+    "jupyterlab",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bot_ml*"]

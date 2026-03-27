@@ -1,0 +1,1043 @@
+syntax = "proto3";
+
+package bot;
+
+service HealthService {
+  // Streams health updates every N seconds or on change
+  rpc StreamHealth (Empty) returns (stream HealthReport);
+}
+
+service ControlService {
+  rpc StartRecorder (RecorderConfig) returns (Response);
+  rpc StopRecorder (StopRequest) returns (Response);
+  rpc GetStatus (Empty) returns (SystemStatus);
+  rpc DeleteRun (DeleteRunRequest) returns (DeleteResponse);
+}
+
+service MarketService {
+    rpc SubscribeMarketSnapshot (MarketSubscription) returns (stream MarketSnapshot);
+}
+
+message Empty {}
+
+message StopRequest {
+    string run_id = 1;
+}
+
+message Response {
+  bool success = 1;
+  string message = 2;
+  string run_id = 3; // Returned on StartRecorder
+}
+
+message DeleteRunRequest {
+    string run_id = 1;
+}
+
+message RecorderConfig {
+  string symbol = 1;                     // Legacy single-symbol (still works)
+  repeated string enabled_streams = 2;   // e.g. "aggTrade", "depth", "bookTicker"
+  string data_dir = 3;                   // Optional, defaults to ./runs
+  repeated string symbols = 4;           // Multi-symbol mode (overrides symbol if non-empty)
+  uint32 rotation_interval_minutes = 5;  // Auto-rotate every N minutes (0 = disabled, default 60)
+  bool auto_normalize = 6;               // Auto-normalize on rotation close (default true)
+}
+
+message MarketSubscription {
+    string symbol = 1;
+}
+
+message HealthReport {
+  string system_status = 1; // "Healthy", "Degraded", "Critical"
+  map<string, ComponentHealth> components = 2;
+}
+
+message ComponentHealth {
+  string status = 1; // "OK", "WARNING", "ERROR", "STARTING"
+  string message = 2;
+  string last_heartbeat = 3; // ISO 8601
+  map<string, string> metrics = 4;
+}
+
+message SystemStatus {
+  bool recorder_active = 1;
+  string current_run_id = 2;
+  int64 events_recorded = 3;
+  double uptime_seconds = 4;
+}
+
+message MarketSnapshot {
+    string symbol = 1;
+    double best_bid = 2;
+    double best_ask = 3;
+    double spread_percent = 4;
+    double mid_price = 5;
+    int64 last_update_id = 6;
+    bool in_sync = 7;
+    
+    // Stats
+    double events_per_sec = 8;
+    double lag_p99_ms = 9;
+    int64 sequence_gaps = 10;
+    int64 file_size_bytes = 11;
+}
+
+service DatasetService {
+    rpc BuildDataset(BuildDatasetRequest) returns (BuildDatasetResponse);
+    rpc ListDatasets(ListDatasetsRequest) returns (ListDatasetsResponse);
+    rpc GetDatasetStatus(GetDatasetStatusRequest) returns (DatasetStatus);
+    rpc GetQualityReport(GetQualityReportRequest) returns (QualityReport);
+    rpc DeleteDataset(DeleteDatasetRequest) returns (DeleteResponse);
+}
+
+message DeleteDatasetRequest {
+    string dataset_id = 1;
+}
+
+message DeleteResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message BuildDatasetRequest {
+    string run_id = 1;
+    string output_name = 2; // Optional alias
+}
+
+message BuildDatasetResponse {
+    string dataset_id = 1;
+    string status = 2; // "QUEUED", "BUILDING", "COMPLETED", "FAILED"
+}
+
+message ListDatasetsRequest {
+    string run_id = 1; // Optional filter
+}
+
+message ListDatasetsResponse {
+    repeated DatasetSummary datasets = 1;
+}
+
+message DatasetSummary {
+    string dataset_id = 1;
+    string run_id = 2;
+    string created_at = 3;
+    string status = 4;
+    QualityReport quality_summary = 5;
+    string feature_profile = 6; // Profile used to build it
+}
+
+message GetDatasetStatusRequest {
+    string dataset_id = 1;
+}
+
+message DatasetStatus {
+    string dataset_id = 1;
+    string state = 2;
+    float progress = 3; // 0.0 to 1.0
+    string message = 4;
+}
+
+message GetQualityReportRequest {
+    string dataset_id = 1;
+}
+
+message QualityReport {
+    string overall_status = 1; // "OK", "WARN", "FAIL"
+    double coverage_pct = 2;
+    int64 total_gaps = 3;
+    repeated string missing_streams = 4;
+    bool usable_for_training = 6; // New
+    bool usable_for_backtest = 7; // New
+    map<string, StreamQuality> streams = 5;
+}
+
+message StreamQuality {
+    double coverage_pct = 1;
+    double lag_p99_ms = 2;
+    double events_per_sec = 3;
+    int64 gap_count = 4;
+    double drift_ms_avg = 5; // New
+    string status = 6;
+}
+
+// --- Replay Service ---
+
+service ReplayService {
+    rpc StartReplay(StartReplayRequest) returns (StartReplayResponse);
+    rpc StopReplay(StopReplayRequest) returns (Empty);
+    rpc GetReplayStatus(GetReplayStatusRequest) returns (ReplayStatus);
+    rpc StreamReplayEvents(StreamReplayEventsRequest) returns (stream ReplayEvent);
+    rpc ControlReplay(ControlReplayRequest) returns (ReplayStatus); // For Pause, Resume, Step, Speed
+}
+
+message StartReplayRequest {
+    string dataset_id = 1;
+    ReplayConfig config = 2;
+}
+
+message StartReplayResponse {
+    string replay_id = 1;
+}
+
+message StopReplayRequest {
+    string replay_id = 1;
+}
+
+message GetReplayStatusRequest {
+    string replay_id = 1;
+}
+
+message StreamReplayEventsRequest {
+    string replay_id = 1;
+}
+
+message ControlReplayRequest {
+    string replay_id = 1;
+    enum Action {
+        PAUSE = 0;
+        RESUME = 1;
+        STEP = 2;
+        SET_SPEED = 3;
+    }
+    Action action = 2;
+    double speed = 3; // Used only if SET_SPEED
+}
+
+message ReplayConfig {
+    double speed = 1; // 1.0 = Realtime, >1.0 = Accelerated, 0.0 = Step/Pause
+    enum ClockMode {
+        CLOCK_EXCHANGE = 0;
+        CLOCK_LOCAL = 1;
+        CLOCK_CANONICAL = 2;
+    }
+    ClockMode clock_mode = 2;
+    int64 start_ts = 3; // Optional start time (ms)
+    int64 end_ts = 4;   // Optional end time (ms)
+    
+    // Quality Gating
+    bool allow_bad_quality = 5;
+    
+    // GUI Optimization
+    int32 ui_sample_every_n = 6; // e.g. 50 or 100
+    int32 ui_max_events_per_sec = 7; // e.g. 200
+    
+    // Debugging
+    bool debug_include_raw = 8;
+}
+
+message ReplayStatus {
+    string replay_id = 1;
+    string state = 2; // "RUNNING", "PAUSED", "COMPLETED", "STOPPED", "ERROR"
+    int64 current_ts = 3;
+    double speed = 4;
+    double progress = 5; // 0.0 to 1.0
+    int64 events_emitted = 6;
+    
+    // Quality Info
+    string quality_status = 7; 
+    bool usable_for_backtest = 8;
+    string reject_reason = 9;
+}
+
+message ReplayEvent {
+    string replay_id = 1;
+    string symbol = 2;
+    string stream_name = 3; // "aggTrade", "depthUpdate", "bookTicker"
+    string event_type = 4;
+    int64 ts_exchange = 5;
+    int64 ts_local = 6;
+    int64 ts_canonical = 13;
+    
+    // Core Data (Lightweight, avoiding JSON parsing for GUI)
+    double price = 7;
+    double quantity = 8;
+    string side = 9; // "buy", "sell"
+    double best_bid = 10;
+    double best_ask = 11;
+    string payload_json = 12; // Only valid if debug_include_raw=true
+    
+    // Extended Data
+    double mark_price = 14;
+    double funding_rate = 15;
+    double liquidation_price = 16;
+    double liquidation_qty = 17;
+    double open_interest = 18;
+}
+
+
+// --- Feature Service ---
+
+service FeatureService {
+    rpc BuildFeatures(BuildFeaturesRequest) returns (BuildFeaturesResponse);
+    rpc GetFeatureStatus(GetFeatureStatusRequest) returns (FeatureStatus);
+    rpc ListFeatures(ListFeaturesRequest) returns (ListFeaturesResponse);
+    rpc PreviewFeatures(PreviewFeaturesRequest) returns (PreviewFeaturesResponse);
+    rpc DeleteFeatures(DeleteFeaturesRequest) returns (DeleteResponse);
+}
+
+message DeleteFeaturesRequest {
+    string features_id = 1;
+}
+
+message BuildFeaturesRequest {
+    string dataset_id = 1;
+    string profile = 2; // "SIMPLE" or "RICH"
+    FeatureConfig config = 3;
+}
+
+message FeatureConfig {
+    int64 sampling_interval_ms = 1;
+    bool emit_partial = 2;
+    bool allow_mock = 3;
+}
+
+message BuildFeaturesResponse {
+    string job_id = 1;
+    string features_id = 2; // Predicted ID if calc instant, or just job ID
+    string status = 3; // "QUEUED", "BUILDING", "COMPLETED", "FAILED"
+}
+
+message GetFeatureStatusRequest {
+    string job_id = 1;
+}
+
+message FeatureStatus {
+    string job_id = 1;
+    string features_id = 2;
+    string state = 3; // "BUILDING", "COMPLETED", "FAILED"
+    double progress = 4;
+    string message = 5;
+    string output_path = 6;
+    int64 vectors_computed = 7;
+}
+
+message ListFeaturesRequest {
+    string dataset_id = 1;
+}
+
+message ListFeaturesResponse {
+    repeated FeatureSummary features = 1;
+}
+
+message FeatureSummary {
+    string features_id = 1;
+    string profile = 2;
+    string created_at = 3;
+    int64 count = 4;
+}
+
+message PreviewFeaturesRequest {
+    string features_id = 1;
+    uint32 n_rows = 2;
+}
+
+message PreviewFeaturesResponse {
+    repeated FeatureRow rows = 1;
+}
+
+message FeatureRow {
+    map<string, double> columns = 1;
+    int64 ts = 2;
+}
+
+// --- Paper Service ---
+
+service PaperService {
+    rpc StartPaper (StartPaperRequest) returns (StartPaperResponse);
+    rpc StopPaper (StopPaperRequest) returns (StopPaperResponse);
+    rpc GetPortfolioStatus (GetPortfolioStatusRequest) returns (PortfolioStatus);
+    rpc StreamPortfolioUpdates (StreamPortfolioUpdatesRequest) returns (stream PortfolioUpdate);
+    rpc SubmitOrder (SubmitOrderRequest) returns (SubmitOrderResponse);
+    rpc CancelOrder (CancelOrderRequest) returns (CancelOrderResponse);
+}
+
+message StartPaperRequest {
+    string run_id = 1;
+    string dataset_id = 2;
+    string feature_profile = 3;
+    double initial_capital = 4;
+    double replay_speed = 5;
+}
+
+message StartPaperResponse {
+    string paper_id = 1;
+}
+
+message StopPaperRequest {
+    string paper_id = 1;
+}
+
+message StopPaperResponse {
+    string status = 1;
+}
+
+message GetPortfolioStatusRequest {
+    string paper_id = 1;
+}
+
+message StreamPortfolioUpdatesRequest {
+    string paper_id = 1;
+}
+
+message SubmitOrderRequest {
+    string paper_id = 1;
+    string symbol = 2;
+    string side = 3;      // "Buy", "Sell"
+    string order_type = 4; // "Limit", "Market"
+    double price = 5;
+    double qty = 6;
+}
+
+message SubmitOrderResponse {
+    string order_id = 1;
+    bool success = 2;
+    string message = 3;
+}
+
+message CancelOrderRequest {
+    string paper_id = 1;
+    string order_id = 2;
+}
+
+message CancelOrderResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message Position {
+    string symbol = 1;
+    string side = 2;
+    double qty = 3;
+    double entry_price = 4;
+    double unrealized_pnl = 5;
+    double realized_pnl = 6;
+    double realized_fees = 7;
+    double realized_funding = 8;
+    double liquidation_price = 9;
+}
+
+message Order {
+    string id = 1;
+    string symbol = 2;
+    string side = 3;
+    string type = 4;
+    double price = 5;
+    double qty = 6;
+    string status = 7;
+}
+
+message PortfolioStatus {
+    string paper_id = 1;
+    double cash = 2;
+    double equity = 3;
+    double margin_used = 4;
+    double available_margin = 5;
+    repeated Position positions = 6;
+    int32 active_order_count = 7;
+    string state = 8; // RUNNING, STOPPED, FINISHED
+}
+
+message PortfolioUpdate {
+    PortfolioStatus status = 1;
+    repeated Order recent_orders = 2;
+    int64 timestamp = 3;
+}
+
+// --- RL Service ---
+
+service RLService {
+    rpc ResetEpisode (ResetRequest) returns (ResetResponse);
+    rpc Step (StepRequest) returns (StepResponse);
+    rpc GetEnvInfo (EnvInfoRequest) returns (EnvInfoResponse);
+}
+
+message ResetRequest {
+    string dataset_id = 1;
+    string symbol = 2;
+    uint32 seed = 3;
+    RLConfig config = 4;
+    int64 start_ts = 5;  // Episode window start timestamp (ms), 0 = from beginning
+    map<string, string> metadata = 6;
+    int64 end_ts = 7;    // Episode window end timestamp (ms), 0 = until end
+}
+
+message ResetResponse {
+    string episode_id = 1;
+    Observation obs = 2;
+    StepInfo info = 3;
+    EnvState state = 4;
+    FeatureHealth feature_health = 5;
+}
+
+message StepRequest {
+    string episode_id = 1;
+    Action action = 2;
+}
+
+message StepResponse {
+    Observation obs = 1;
+    double reward = 2;
+    bool done = 3;
+    StepInfo info = 4;
+    EnvState state = 5;
+    FeatureHealth feature_health = 6;
+}
+
+message FeatureHealth {
+    int64 book_age_ms = 1;
+    int64 trades_age_ms = 2;
+    int64 mark_age_ms = 3;
+    int64 funding_age_ms = 4;
+    int64 oi_age_ms = 5;
+    float obs_quality = 6;
+}
+
+enum MakerFillModel {
+    MAKER_FILL_MODEL_CONSERVATIVE = 0;   // Strict queue modeling (Default)
+    MAKER_FILL_MODEL_SEMI_OPTIMISTIC = 1; // Faster fills (scaled queue)
+    MAKER_FILL_MODEL_OPTIMISTIC = 2;      // Fill on touch
+}
+
+message RLConfig {
+    ReplayConfig.ClockMode clock_mode = 1;
+    double replay_speed = 2;
+    uint32 decision_interval_ms = 3;
+    bool allow_bad_quality = 4;
+    string market = 5;
+    double initial_equity = 6;
+    double max_leverage = 7;
+    double max_pos_frac = 8;
+    double maker_fee = 9;
+    double taker_fee = 10;
+    double slip_bps = 11;
+    double max_daily_drawdown = 12;
+    double hard_disaster_drawdown = 13;
+    uint32 max_hold_ms = 14;
+    string feature_profile = 15;
+    double reward_overtrading_penalty = 16;
+    double reward_exposure_penalty = 17;
+    double reward_toxic_fill_penalty = 18;
+    
+    // Curriculum V3 fields
+    MakerFillModel fill_model = 19;
+    double reward_tib_bonus_bps = 20; // Time-in-book bonus (bps per step)
+    bool random_start_offset = 21;
+    int64 min_episode_events = 22;    // minimum events before end_ts to avoid short episodes
+    double reward_maker_fill_bonus = 23;
+    double reward_taker_fill_penalty = 24;
+    double reward_idle_posting_penalty = 25;
+    uint32 reward_mtm_penalty_window_ms = 26;
+    double reward_mtm_penalty_multiplier = 27;
+    double reward_reprice_penalty_bps = 28;
+    double post_delta_threshold_bps = 29;
+    double reward_distance_to_mid_penalty = 30;
+    double reward_skew_penalty_weight = 31;
+    double reward_adverse_selection_bonus_multiplier = 32;
+    double reward_realized_pnl_multiplier = 33;
+    double reward_cancel_all_penalty = 34;
+
+    // Reward v4 features
+    double reward_inventory_change_penalty = 35;
+    double reward_two_sided_bonus = 36;
+    
+    // Reward v5 features
+    double reward_taker_action_penalty = 37;
+    double reward_quote_presence_bonus = 38;
+
+    // vNext: Hard gate configs
+    double close_position_loss_threshold = 39; // Min uPnL loss fraction to allow CLOSE_POSITION (e.g. 0.003 = 0.3%)
+    double min_post_offset_bps = 40;           // Min offset from mid to allow POST_BID/ASK (e.g. 0.3 bps)
+    double imbalance_block_threshold = 41;     // Block posting into adverse imbalance > this (e.g. 0.6)
+
+    // vNext: Simplified reward config
+    double reward_fee_cost_weight = 42;        // Weight for fee cost amplification (e.g. 0.1)
+    double reward_as_penalty_weight = 43;      // Weight for adverse selection penalty (e.g. 0.5)
+    double reward_inventory_risk_weight = 44;  // Weight for quadratic inventory risk (e.g. 0.0005)
+    uint32 reward_as_horizon_ms = 45;          // AS evaluation horizon in ms (e.g. 3000)
+    double profit_floor_bps = 46;
+    double stop_loss_bps = 47;
+    bool use_selective_entry = 48;
+    double entry_veto_threshold_bps = 49;
+    double reward_realized_pnl_bonus_weight = 50;
+}
+
+message Observation {
+    repeated float vec = 1;
+    int64 ts = 2;
+}
+
+enum ActionType {
+    HOLD = 0;
+    OPEN_LONG = 1;
+    ADD_LONG = 2;
+    REDUCE_LONG = 3;
+    CLOSE_LONG = 4;
+    OPEN_SHORT = 5;
+    ADD_SHORT = 6;
+    REDUCE_SHORT = 7;
+    CLOSE_SHORT = 8;
+    REPRICE = 9;
+}
+
+message Action {
+    ActionType type = 1;
+}
+
+message EnvState {
+    double equity = 1;
+    double cash = 2;
+    double position_qty = 3;
+    double entry_price = 4;
+    double unrealized_pnl = 5;
+    double realized_pnl = 6;
+    double fees_paid = 7;
+    double leverage = 8;
+    string position_side = 9;
+}
+
+message StepInfo {
+    int64 ts = 1;
+    string reason = 2;
+    double mid_price = 3;
+    double mark_price = 4;
+    uint32 trades_executed = 5;
+    uint32 maker_fills = 6;
+    uint32 toxic_fills = 7;
+    uint32 stale_expiries = 8;
+    uint32 cancel_count = 9;
+    uint32 active_order_count = 10;
+    uint32 reprice_count = 11;
+    repeated TradeFill fills = 12;
+    // vNext gate telemetry
+    uint32 gate_close_blocked = 13;     // CLOSE_POSITION gate blocked count this step
+    uint32 gate_offset_blocked = 14;    // Min offset gate blocked count this step
+    uint32 gate_imbalance_blocked = 15; // Imbalance gate blocked count this step
+    map<string, uint32> action_counts = 16;
+    double realized_pnl_total = 17;
+    double avg_win_hold_ms = 18;
+    double avg_loss_hold_ms = 19;
+    map<string, uint32> exit_distribution = 20;
+    uint32 entry_veto_count = 21;
+    uint32 exit_blocked_count = 22;
+    double exit_blocked_avg_pnl_bps = 23;
+    uint32 exit_blocked_1_to_4_count = 24;
+    uint32 opportunity_lost_count = 25;
+}
+
+message TradeFill {
+    string trace_id = 1;
+    string symbol = 2;
+    string side = 3; 
+    double price = 4;
+    double qty = 5;
+    double fee = 6;
+    string liquidity = 7; 
+    int64 ts_event = 8;
+    int64 ts_recv_local = 9;
+    bool is_toxic = 10;
+}
+
+message EnvInfoRequest {}
+
+message EnvInfoResponse {
+    int32 obs_dim = 1;
+    int32 action_dim = 2;
+    repeated string obs_labels = 3;
+    repeated string action_labels = 4;
+    string feature_signature = 5;
+    string feature_profile = 6;
+}
+
+// --- Orchestrator Service ---
+
+service OrchestratorService {
+    rpc StartOrchestrator(StartOrchestratorRequest) returns (StartOrchestratorResponse);
+    rpc StopOrchestrator(StopOrchestratorRequest) returns (StopOrchestratorResponse);
+    rpc GetOrchestratorStatus(GetOrchestratorStatusRequest) returns (OrchestratorStatus);
+    rpc StreamOrchestratorEvents(StreamOrchestratorEventsRequest) returns (stream OrchestratorEvent);
+    rpc SetMode(SetModeRequest) returns (SetModeResponse);
+    rpc UpdateConfig(UpdateConfigRequest) returns (UpdateConfigResponse);
+    rpc ResetPaperState(Empty) returns (UpdateConfigResponse);
+    rpc ReloadPolicy(ReloadPolicyRequest) returns (ReloadPolicyResponse);
+    // Risk & Commission Management
+    rpc UpdateRiskConfig(RiskConfigProto) returns (UpdateConfigResponse);
+    rpc GetRiskStatus(Empty) returns (RiskStatusProto);
+    rpc UpdateCommissionPolicy(CommissionPolicyProto) returns (UpdateConfigResponse);
+    rpc GetCommissionStats(Empty) returns (CommissionStatsProto);
+    rpc ResetRiskState(Empty) returns (UpdateConfigResponse);
+    rpc KillSwitch(KillSwitchRequest) returns (UpdateConfigResponse);
+    rpc GetHealthStatus(Empty) returns (HealthStatusProto);
+}
+
+message ReloadPolicyRequest {
+    string symbol = 1;      // Optional: if empty, reloads all or uses default
+    string model_path = 2;  // Path to the new model
+}
+
+message ReloadPolicyResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message StartOrchestratorRequest {
+    repeated SymbolConfig symbols = 1;
+    string dataset_id = 2; // Optional for replay
+    OrchestratorConfig config = 3;
+    string mode = 4; // "PAPER", "LIVE"
+    bool allow_live = 5; // Must be true for LIVE
+    bool record_experience = 6; // Module X: Enable Experience Recorder
+}
+
+message StartOrchestratorResponse {
+    string run_id = 1;
+    string status = 2;
+}
+
+message StopOrchestratorRequest {
+    string run_id = 1;
+}
+
+message StopOrchestratorResponse {
+    string status = 1;
+}
+
+message GetOrchestratorStatusRequest {}
+
+message OrchestratorStatus {
+    string state = 1; // "RUNNING", "STOPPED"
+    string mode = 2; // "PAPER", "LIVE"
+    int64 start_time = 3;
+    double global_equity = 4;
+    double global_cash = 5;
+    double global_exposure = 6;
+    double global_exposure_frac = 7;
+    double max_dd_seen = 8;
+    repeated SymbolStatus symbols = 9;
+    double global_margin_used = 10;
+}
+
+enum LeverageMode {
+    LEVERAGE_MODE_UNSPECIFIED = 0;
+    LEVERAGE_MODE_MANUAL = 1;
+    LEVERAGE_MODE_AUTO = 2;
+    LEVERAGE_MODE_FIXED = 3;
+}
+
+message SymbolStatus {
+    string symbol = 1;
+    string position_side = 2;
+    double position_qty = 3;
+    double entry_price = 4;
+    double unrealized_pnl = 5;
+    double mid_price = 6;
+    double liquidation_price = 7;
+    double realized_fees = 8;
+    double realized_pnl = 9;
+    double notional_value = 10;
+    double funding_pnl = 11;
+    double entry_fees = 12;
+    double exit_fees = 13;
+    int64 last_decision_ts = 14;
+    string status = 15;
+    double effective_leverage = 16;
+    double last_risk_score = 17;
+    double equity_alloc_used = 18;
+    // Adaptive Risk
+    bool adaptive_risk_active = 19;
+    double rolling_winrate = 20;
+    double rolling_pnl = 21;
+    LeverageMode leverage_mode = 22;
+    string leverage_reason = 23;
+    string leverage_apply_state = 24;   // "OFF" | "APPLIED_OK" | "APPLIED_FAIL"
+    string leverage_apply_error = 25;
+    string last_action = 26;
+    double event_rate = 27;
+    string health_state = 28; // "NORMAL", "DEGRADED"
+    float obs_quality = 29;    // 0.0 to 1.0
+    uint32 ob_consecutive_failures = 30;
+    uint32 ob_next_resync_delay_ms = 31;
+    string ob_state = 32;
+}
+
+message StreamOrchestratorEventsRequest {}
+
+message OrchestratorEvent {
+    int64 ts = 1;
+    string level = 2; // "INFO", "WARN", "ERROR", "CRITICAL"
+    string type = 3; // "DECISION", "ORDER", "FILL", "RISK", "MODE", "HEALTH", "AI_FEATURES"
+    string symbol = 4; // Optional
+    string message = 5;
+    string payload_json = 6;
+    repeated float obs = 7;
+    map<string, double> metrics = 8;
+}
+
+message SetModeRequest {
+    string mode = 1;
+    bool confirm_live = 2;
+}
+
+message SetModeResponse {
+    string old_mode = 1;
+    string new_mode = 2;
+}
+
+message UpdateConfigRequest {
+    OrchestratorConfig config = 1;
+    repeated SymbolConfig symbol_updates = 2;
+}
+
+message UpdateConfigResponse {
+    bool success = 1;
+}
+
+message OrderBookWatchdogConfig {
+    bool enabled = 1;
+    uint32 timeout_seconds = 2; // e.g. 60
+}
+
+message SymbolConfig {
+    string symbol = 1;
+    int32 decision_interval_ms = 2;
+    double max_pos_frac = 3;          // fraction of equity used as margin per position
+    reserved 4;  // was leverage_declared (dead field, replaced by leverage_mode/manual/fixed)
+    string policy_id = 5;
+    string exec_mode = 6; // "MARKET", "MAKER", "HYBRID"
+    // Module 7.1: Leverage Control
+    LeverageMode leverage_mode = 7;
+    double leverage_manual = 8;
+    double leverage_fixed = 9;
+    double auto_min_leverage = 10;
+    double auto_max_leverage = 11;
+    uint64 auto_cooldown_seconds = 12;
+    double auto_max_change_per_min = 13;
+    bool live_apply_enabled = 14;
+    bool live_apply_on_start = 15;
+    bool live_readback_enabled = 16;
+    // Configurable AUTO references
+    double auto_vol_ref = 17;                     // default 0.002
+    double auto_spread_ref = 18;                  // default 0.001
+    uint64 live_readback_interval_seconds = 19;   // default 120
+    string feature_profile = 20;                  // "Simple" or "Rich"
+    OrderBookWatchdogConfig watchdog = 21;
+}
+
+message OrchestratorConfig {
+    double max_daily_drawdown_frac = 1;
+    double max_total_exposure_frac = 2;
+    bool enable_live_kill_switch = 3;
+    bool auto_rollback_enabled = 4;
+    double emergency_dd_frac = 5;
+    uint32 max_consecutive_losses = 6;
+    AdaptiveRiskConfig adaptive_risk = 7;
+    double fee_buffer_frac = 8;
+    string risk_preset = 9; // "CONSERVATIVE", "BALANCED", "AGGRESSIVE"
+    bool paper_can_run_when_live_stopped = 10;
+    double volatility_adapt_strength = 11;
+    double kelly_growth_fraction = 12; // 0.0 = Disabled, 1.0 = Full Kelly, 0.5 = Half Kelly
+    double target_volatility = 13;     // 0.0 = Disabled, e.g. 0.01 (1%) per day
+    double max_monthly_dd_frac = 14;   // 0.25 = 25% monthly drawdown limit
+    double max_total_dd_frac = 15;     // 1.0 = 100% (paper mode, effectively disabled)
+    CommissionPolicyProto commission = 16;
+}
+
+message AdaptiveRiskConfig {
+    bool enabled = 1;
+    uint32 window_trades = 2;
+    double min_winrate = 3;
+    double max_drawdown_pct = 4;
+    double scale_down_factor = 5;
+}
+
+// --- Risk & Commission Config ---
+
+message RiskConfigProto {
+    double max_daily_dd_pct = 1;
+    double max_monthly_dd_pct = 2;
+    double max_total_dd_pct = 3;
+    double risk_per_trade_pct = 4;
+    double max_total_leverage = 5;
+    uint32 max_positions_total = 6;
+    uint32 max_positions_per_symbol = 7;
+    uint32 max_order_rate_per_min = 8;
+    bool flatten_on_disable = 9;
+    bool kill_switch_enabled = 10;
+    double min_notional_per_order = 11;
+    double max_notional_per_order = 12;
+    string sizing_mode = 13; // "StopDistanceBased" or "FixedFractionOfEquity"
+    double default_stop_distance_bps = 14;
+    bool allow_reduce_only_when_disabled = 15;
+    double profit_floor_bps = 16;
+    double stop_loss_bps = 17;
+    bool use_selective_entry = 18;
+    double entry_veto_threshold_bps = 19;
+}
+
+message RiskStatusProto {
+    double daily_dd_pct = 1;
+    double monthly_dd_pct = 2;
+    double total_dd_pct = 3;
+    string state = 4;
+    double equity = 5;
+    double daily_peak = 6;
+    double monthly_peak = 7;
+    double total_peak = 8;
+    uint32 order_rate_current = 9;
+    string last_trigger_kind = 10;
+    string last_trigger_reason = 11;
+    bool needs_flatten = 12;
+}
+
+message CommissionPolicyProto {
+    bool prefer_maker = 1;
+    bool allow_taker = 2;
+    double max_taker_ratio = 3;
+    double max_fee_bps_per_trade = 4;
+    double maker_fee_bps = 5;
+    double taker_fee_bps = 6;
+    double maker_entry_offset_bps = 7;
+    uint64 maker_timeout_ms = 8;
+    string maker_timeout_policy = 9; // "CancelAndSkip" or "ConvertToTaker"
+    bool allow_emergency_taker = 10;
+    bool allow_override_for_emergency = 11;
+    uint32 taker_ratio_window_sec = 12;
+    double min_spread_bps_for_maker = 13;
+    double max_spread_bps_for_entry = 14;
+    bool require_book_for_market_slippage_est = 15;
+}
+
+message CommissionStatsProto {
+    uint64 maker_count = 1;
+    uint64 taker_count = 2;
+    double total_fees_usdt = 3;
+    double taker_ratio = 4;
+    double avg_fee_bps = 5;
+    double maker_ratio = 6;
+    double avg_total_cost_bps = 7;
+}
+
+message KillSwitchRequest {
+    bool enabled = 1;
+    string reason = 2;
+}
+
+message SymbolHealthProto {
+    string symbol = 1;
+    bool ws_connected = 2;
+    bool book_synced = 3;
+    uint64 book_resets = 4;
+    double spread_bps = 5;
+}
+
+message HealthStatusProto {
+    repeated SymbolHealthProto symbols = 1;
+    double lag_p50_ms = 2;
+    double lag_p99_ms = 3;
+    uint64 errors_total = 4;
+    string last_error = 5;
+}
+
+// --- Policy Service ---
+
+service PolicyService {
+    rpc Infer(InferRequest) returns (InferResponse);
+}
+
+message InferRequest {
+    string run_id = 1;
+    string policy_id = 2;
+    string symbol = 3;
+    Observation obs = 4;
+}
+
+message InferResponse {
+    Action action = 1;
+    repeated float logits = 2;
+    float log_prob = 3; // Optional action log-probability
+    float value = 4;    // Optional value estimate
+}
+
+// --- Analytics Service ---
+
+service AnalyticsService {
+    rpc GetSessionMetrics(SessionRequest) returns (SessionMetricsResponse);
+    rpc GetEquityCurve(SessionRequest) returns (EquityCurveResponse);
+    rpc ListSessions(Empty) returns (SessionListResponse);
+    rpc DeleteSession(DeleteSessionRequest) returns (DeleteResponse);
+    rpc GetRoundTrips(SessionRequest) returns (RoundTripsResponse);
+}
+
+message RoundTripsResponse {
+    repeated RoundTripRecord trades = 1;
+}
+
+message RoundTripRecord {
+    string symbol = 1;
+    string side = 2; // "LONG" or "SHORT"
+    double qty = 3;
+    double entry_price = 4;
+    double exit_price = 5;
+    int64 entry_ts = 6;
+    int64 exit_ts = 7;
+    double margin_used = 8;
+    double leverage = 9;
+    double pnl_gross = 10;
+    double pnl_net = 11;
+    double total_fees = 12;
+    double funding_fees = 13;
+}
+
+message DeleteSessionRequest {
+    string session_id = 1;
+}
+
+message SessionRequest {
+    string session_id = 1;
+}
+
+message SessionMetricsResponse {
+    double total_return = 1;
+    double max_drawdown = 2;
+    double sharpe_ratio = 3;
+    double profit_factor = 4;
+    double win_rate = 5;
+    double total_fees = 6;
+    uint64 total_trades = 7;
+    string json_report = 8;
+}
+
+message EquityCurveResponse {
+    repeated EquityPoint points = 1;
+}
+
+message EquityPoint {
+    int64 timestamp = 1;
+    double equity = 2;
+    double cash = 3;
+    double unrealized_pnl = 4;
+}
+
+message SessionListResponse {
+    repeated string session_ids = 1;
+}
+
+// --- Backtest Service ---
+
+service BacktestService {
+    rpc RunBacktest(BacktestRequest) returns (BacktestResponse);
+}
+
+message BacktestRequest {
+    string dataset_id = 1;
+    string strategy_name = 2; // "EmaCross", "RangeBreakout"
+    string strategy_config_json = 3; 
+    string execution_config_json = 4; 
+    uint32 seed = 5;
+}
+
+message BacktestResponse {
+    string backtest_id = 1;
+    bool success = 2;
+    string error_message = 3;
+    string json_report = 4;
+}

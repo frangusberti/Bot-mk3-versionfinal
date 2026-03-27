@@ -1,0 +1,60 @@
+name: risk-hardening-checks
+
+on:
+  pull_request:
+    paths:
+      - 'crates/bot-server/**'
+      - 'crates/bot-data/**'
+      - 'TRACKING_CAMBIOS_RISK_ORCHESTRATOR.txt'
+      - '.github/workflows/risk_hardening_checks.yml'
+      - 'scripts/update_tracking_risk.sh'
+  push:
+    branches: ["work", "main", "master"]
+    paths:
+      - 'crates/bot-server/**'
+      - 'crates/bot-data/**'
+      - 'TRACKING_CAMBIOS_RISK_ORCHESTRATOR.txt'
+      - '.github/workflows/risk_hardening_checks.yml'
+      - 'scripts/update_tracking_risk.sh'
+
+jobs:
+  rust-risk-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+
+      - name: Merge conflict markers guard
+        run: |
+          if rg -n '^<<<<<<< ' crates/bot-server crates/bot-data .github/workflows docs scripts TRACKING_CAMBIOS_RISK_ORCHESTRATOR.txt; then
+            echo "Found unresolved merge markers (start marker)"
+            exit 1
+          fi
+          if rg -n '^=======$' crates/bot-server crates/bot-data .github/workflows docs scripts TRACKING_CAMBIOS_RISK_ORCHESTRATOR.txt; then
+            echo "Found unresolved merge markers (separator marker)"
+            exit 1
+          fi
+          if rg -n '^>>>>>>> ' crates/bot-server crates/bot-data .github/workflows docs scripts TRACKING_CAMBIOS_RISK_ORCHESTRATOR.txt; then
+            echo "Found unresolved merge markers (end marker)"
+            exit 1
+          fi
+
+      - name: Compile check (bot-server)
+        run: cargo check -p bot-server
+      - name: Risk/orchestrator focused tests
+        run: |
+          cargo test -p bot-server reduce_only_detects_closing_trade -- --nocapture
+          cargo test -p bot-server leverage_apply_requires_cooldown_and_delta -- --nocapture
+          cargo test -p bot-server test_order_rate_exceeded -- --nocapture

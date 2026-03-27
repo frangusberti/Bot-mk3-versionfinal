@@ -1,0 +1,47 @@
+# Audit Report: Commission & Fee Calculations
+
+## Overview
+This audit was performed to verify the accuracy and robustness of the commission and fee logic in the BOTMK3 system. The audit covers the Rust backend (commission policy, cost model, portfolio accounting) and the Python GUI (data reporting and PnL calculation).
+
+## Key Findings
+
+### 1. Commission Policy Defaults
+- **File**: [commission.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/commission.rs)
+- **Status**: ✅ **Correctly Configured**
+- **Details**: The system defaults to **2.0 bps (Maker)** and **5.0 bps (Taker)**, which aligns with Binance VIP 0 taker/maker fees for USDS-M futures.
+- **Issue**: These values are currently "hardcoded" in the sense that the GUI provides no mechanism to override them during orchestrator startup.
+
+### 2. Simulated Fee Accuracy (Paper Mode)
+- **File**: [execution.rs](file:///C:/Bot%20mk3/crates/bot-data/src/simulation/execution.rs)
+- **Status**: ✅ **Mathematically Sound**
+- **Details**: The [ExecutionEngine](file:///C:/Bot%20mk3/crates/bot-data/src/simulation/execution.rs#6-28) correctly pulls `maker_fee_bps` and `taker_fee_bps` from the [ExecutionConfig](file:///C:/Bot%20mk3/crates/bot-data/src/simulation/structs.rs#148-168). Fees are calculated as: 
+  `fee = qty * price * (fee_bps / 10,000)`.
+
+### 3. Alpha-Cost Integration (The "Zero Edge" Gap)
+- **File**: [agent.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/agent.rs)
+- **Status**: ❌ **CRITICAL GAP**
+- **Details**: In `agent.rs:971`, the `expected_move_bps_logit` is hardcoded to **0.0**.
+- **Impact**: The [CostModel](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/cost_model.rs#45-46) evaluates every trade candidate against a predicted move of zero. Since Taker fees (5 bps) + Slippage/Adverse Selection > 0, the system can **never justify a Taker fill**. It forces a strictly defensive "Maker or Nothing" stance, which can lead to missed fills or poor execution in trending markets.
+
+### 4. Portfolio Accounting
+- **File**: [portfolio.rs](file:///C:/Bot%20mk3/crates/bot-data/src/simulation/portfolio.rs)
+- **Status**: ⚠️ **PnL Naming Inconsistency**
+- **Details**: 
+  - Rust `realized_pnl` reflects **Gross PnL** (price delta * qty).
+  - Fees are deducted from `cash_usdt` separately.
+  - Python GUI `net_pnl` reflects **Gross - Fees**.
+- **Impact**: This is mathematically correct but prone to confusion when comparing backend logs with GUI tables.
+
+### 5. GUI Transparency
+- **File**: [risk_panel.py](file:///C:/Bot%20mk3/python/bot_gui/tabs/risk_panel.py)
+- **Status**: ✅ **Accurate Display**
+- **Details**: The risk panel correctly displays total fees paid, average bps, and taker ratio.
+
+## Hardening Recommendations
+
+1. **Connect Predicted Edge**: Modify the Policy Server and Agent to pass the model's [value](file:///C:/Bot%20mk3/python/bot_gui/tabs/risk_panel.py#61-80) (properly scaled to bps) into the [CostModel](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/cost_model.rs#45-46).
+2. **GUI Configurability**: Add "Maker Fee BPS" and "Taker Fee BPS" inputs to the Orchestrator tab.
+3. **Clean Up Legacy Code**: Remove the confusing hardcoded parameters in the `SymbolAgent::submit_order` calls which are currently ignored by the backend but clutter the code.
+
+## Verification Plan
+Manual test of fee overrides via GUI (once implemented) and observation of the BOT becoming more "aggressive" (using Taker) when predicted edge exceeds the cost threshold.

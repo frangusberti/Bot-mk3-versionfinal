@@ -1,0 +1,25 @@
+# BOTMK3 Leakage & Causality Audit Report (Sprint 4)
+
+This audit matrix explicitly documents all potential data leakage vectors and temporal assumptions within the BOTMK3 pipeline, tracing data from exchange payload ingestion to Orchestrator execution.
+
+## Audit Matrix
+
+| Vector | Description | Status | Verification Mechanism / Proof |
+|---|---|---|---|
+| **1. Feature Generation Timing** | Does `fv.ts` look ahead? | `RULED OUT` | [buffers.rs](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/buffers.rs) ring arrays only push at exact `T0`. `FeatureEngineV2::maybe_emit()` emits based on discrete window boundaries strictly `<` current ingestion time. |
+| **2. Order Book Timing** | Does edge calculation peek at future mid-price? | `RULED OUT` | [agent.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/agent.rs) extracts mid explicitly *before* calculating expected costs. Simulator checks intent prices strictly against current BBO levels. |
+| **3. Trade/Tape Aggregation** | Do 5s/1m flow windows leak future trades? | `RULED OUT` | Aggregation logic processes arrays chronologically. `sum_qty` uses reverse traversal (`idx = 0` is current), dropping trades with `ts > now()`. |
+| **4. External Events (OI / Funding)**| Are delayed API endpoints applied retroactively?| `MITIGATED` | OI/Funding arrives asynchronously. [FeatureEngineV2](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/mod.rs#105-132) correctly processes them with their exact [recv_time](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/mod.rs#652-686) relative lag without back-dating historic rows natively. |
+| **5. Regime Calculation Timing** | Do MAs leak future values? | `RULED OUT` | Expected MAs explicitly evaluate up to `FeatureRow.ts`. No smoothing splines or forward-peeking functions are applied. |
+| **6. Execution/Risk Timing** | Does [agent.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/agent.rs) use `T+1` features during eval? | `RULED OUT` | `SymbolAgent::handle_action` relies exclusively on `self.last_features` populated strictly by the chronologically exact `emit_result` from [FeatureEngine](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/mod.rs#105-132). |
+| **7. Action/Label Alignment** | Did the loaded ML model cheat using `T+n` targets?| `OPEN RISK` | Training logic occurs purely offline in Python. **Corrective Action**: Must verify that the offline Feature DataFrame indices align securely. |
+| **8. Simulator Fill Alignment** | Does `EntryMode::Maker` fill immediately at intent?| `OPEN RISK` | Basic backtest logic natively assumes fill at touch. **Corrective Action**: Require integration of a queue-position or probability-decay fill model in Simulator. |
+| **9. Event vs Recv Time Lag** | Do local network delays cause stream desync? | `MITIGATED` | `agent.rs/desync_watchdog` explicitly aborts trading via `degraded_timeout` and limits latency gaps to `1000ms`. |
+| **10. Buffer Indexing Lookahead** | Does `buffer[0]` equal `T+1`?| `RULED OUT` | `RingBuffer::push()` enforces `buffer[0]` is the *most recently arrived* update. All windowed iterations scan backwards into history `[0..N]`. |
+
+## Corrective Action Plan for Open Risks
+
+1. **Simulator Fill Alignment (Risk 8)**: Update [bot-server/src/services/backtest.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/backtest.rs) to delay `EntryMode::Maker` fills probabilistically, enforcing at least 1-tick delay or volume-ahead queue checks natively.
+2. **Action/Label Alignment (Risk 7)**: Ensure `Target_Move_Bps` is purely derived from `shift(-N)` logically in offline modeling. Not explicitly addressable in Rust runtime, but documented as an operational requirement.
+
+**Audit Status:** Baseline temporal integrity is strong across the Rust runtime natively. Open Execution Simulator risks will be addressed before proceeding to walk-forward validations.

@@ -1,0 +1,284 @@
+# Sprint 3 Blueprint — Execution, Net Edge, and Dynamic Risk
+
+## A. CURRENT-STATE AUDIT FOR SPRINT 3
+
+1. **What already exists (Reuse/Extend):**
+   - **[RiskGate](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/gate.rs#20-35) ([gate.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/gate.rs))**: Already computes health timeouts (`degraded_timeout`, `low_quality_timeout`), consecutive orderbook failure cooldowns (`failure_cooldown`), and basic hysteresis.
+   - **[CommissionPolicy](file:///C:/Bot%20mk3/proto/bot.proto#789-806) ([commission.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/commission.rs))**: Already decides marker/taker preferences based on [taker_ratio](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/commission.rs#170-175), `spread_bps` thresholds, and timeout policies.
+   - **[RiskManager](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#340-375) ([risk.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs))**: Tracks [RiskState](file:///C:/Bot%20mk3/proto/bot.proto#569-570) (Daily, Monthly, Total limits), computes equity peaks, handles max positioning and kill switches. Handles `RiskSizingMode` (Fixed vs StopDistance).
+   - **[Agent](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/agent.rs#41-88) ([agent.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/agent.rs))**: Holds the pipeline calling [RiskGate](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/gate.rs#20-35) early to suppress inference, calls `policy.infer_action`, applying leverage and interacting directly with [ExecutionInterface](file:///C:/Bot%20mk3/crates/bot-data/src/execution/mod.rs#6-13).
+
+2. **What is missing:**
+   - **Pre-trade execution quality block**: No deterministic execution quality score gating the [infer_action](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/policy.rs#115-180) output.
+   - **Expected trade cost model**: Actual execution costs (fee, spread crossing, slip) are not formally estimated pre-trade.
+   - **Expected net edge gate**: The AI policy outputs an abstract [value](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/leverage.rs#655-674) and [action](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/buffers.rs#470-482), but there is no explicit calculation of `Gross Edge - Costs = Net Edge > Threshold`.
+   - **Maker/Taker decision policy based on Edge**: [CommissionPolicy](file:///C:/Bot%20mk3/proto/bot.proto#789-806) currently focuses on ratio limits and spread, not on whether the setup's net edge justifies taking liquidity.
+   - **Dynamic sizing multipliers**: Sizing is mostly static/fixed fraction. It lacks regime, conviction, or execution quality multipliers.
+   - **Setup-aware stop policy**: Relies on a static `default_stop_distance_bps`.
+
+3. **What is dangerous or underspecified:**
+   - **Hidden Cost Assumptions/Gross vs Net Edge**: The model might emit `OPEN_LONG` with low confidence. Without a pre-trade cost subtraction, trades could be permitted in marginal environments.
+   - **Static Sizes & Stops**: Failing to scale down during shock regimes or wide spreads.
+   - **Veto Opacity**: When trades fail, the exact deterministic rejection layer (cost vs spread vs health) is scattered.
+
+---
+
+## B. PRE-TRADE EXECUTION QUALITY BLOCK
+
+This block determines if the microstructure is stable enough for execution, decoupled from direction.
+
+**Inputs:** 
+- `spread_bps`, `spread_vs_baseline`, `depth_deterioration_bid/ask` (from Sprint 2 persistence block)
+- `orderbook.status`, `obs_quality`, `MarketRegime`
+
+**Scoring Logic:**
+- Start with `score = 1.0`.
+- Penalty for `spread_vs_baseline > 1.5`: `score -= 0.2`.
+- Penalty for `obs_quality < 0.8`: `score -= (0.8 - obs_quality)`.
+- Penalty for High [depth_deterioration](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/compute_persistence.rs#238-254): `score -= 0.3`.
+- Penalty for `MarketRegime::Shock`: `score -= 0.4`.
+
+**Thresholds & Veto:**
+- `score` clamped to `[0.0, 1.0]`.
+- **Hard Veto**: if `score < 0.3`.
+- **Soft Penalty**: if `0.3 <= score < 0.6` -> Enforce `MakerOnly` and reduce size.
+
+**Expected Output:**
+```rust
+pub struct ExecutionQualityResult {
+    pub score: f64,
+    pub is_tradeable: bool,
+    pub enforce_maker_only: bool,
+    pub primary_reason: String,
+}
+```
+
+---
+
+## C. EXPECTED TRADE COST MODEL
+
+Explicitly model expected drag per intent before execution.
+
+```rust
+pub struct ExpectedTradeCost {
+    pub fee_bps_est: f64,
+    pub spread_cost_bps_est: f64,
+    pub slippage_bps_est: f64,
+    pub adverse_selection_bps_est: f64, // proxy
+    pub total_cost_bps_est: f64,
+    pub notes: String,
+}
+```
+
+**Formulas & Assumptions:**
+- `fee_bps_est`: If intent is Taker = `taker_fee_bps` (e.g., 5.0). If Maker = `maker_fee_bps` (e.g., 2.0). 
+- `spread_cost_bps_est`: If Taker = `spread_bps / 2.0`. If Maker = `-maker_entry_offset_bps` (capture fraction of spread).
+- `slippage_bps_est`: If Maker = `0.0`. If Taker = rough proxy [(expected_size / top_depth_qty) * slippage_factor](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318). Assumed highly conservative. Fallback cap at 10 bps.
+- `adverse_selection_bps_est`: If Taker in [Shock](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/compute_shocks.rs#5-12) regime = `5.0`. Otherwise `1.0`.
+
+---
+
+## D. EXPECTED NET EDGE GATE
+
+The gate preventing marginal entries.
+
+**Calculation:**
+- `expected_move_bps`: Sourced from ML logit regression, or if using [Action](file:///C:/Bot%20mk3/proto/bot.proto#196-202) classifiers, mapped heuristic (e.g., [value](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/leverage.rs#655-674) scaled by a config calibration factor to bps).
+- `expected_net_edge_bps = expected_move_bps - total_execution_cost_bps - risk_penalty_bps`.
+
+**Threshold:**
+- `expected_net_edge_bps > EDGE_THRESHOLD_BPS` (Configured, e.g., 2.0 bps).
+- **Hard Rule**: If `expected_net_edge_bps < EDGE_THRESHOLD_BPS`, output `EntryDecision::Veto("Negative/Marginal Net Edge")`.
+
+---
+
+## E. ENTRY VETO / EXECUTION FILTER
+
+Deterministic layered filter returning exact decision.
+
+**Execution Priorities (Top to Bottom):**
+1. **Infrastructure**: `RiskGate.check_gate()` fails -> **HARD VETO**.
+2. **Spread**: `spread_bps > config.max_spread_bps_for_entry` -> **HARD VETO**.
+3. **Execution Quality**: `exec_qual.score < 0.3` -> **HARD VETO**.
+4. **Net Edge**: `expected_net_edge_bps < threshold` -> **HARD VETO**.
+5. **Execution Quality Soft**: `0.3 <= exec_qual.score < 0.6` -> **MAKER ONLY MODE** + **REDUCED SIZE**.
+6. **Pass**: -> Move to sizing and routing.
+
+---
+
+## F. MAKER / TAKER DECISION POLICY
+
+Update existing [CommissionPolicy](file:///C:/Bot%20mk3/proto/bot.proto#789-806) to factor edge and regime explicitly.
+
+- **Taker Justified IF**:
+  - `EntryMode::Taker` permissible natively.
+  - AND `urgency == High` OR `expected_net_edge_bps > (taker_total_costs_bps * 1.5)`.
+  - AND `MarketRegime != Dead`.
+- **Maker Preferred IF**:
+  - `expected_net_edge_bps < (taker_total_costs_bps * 1.5)` but still > 0.
+  - AND `spread_bps > min_spread_bps_for_maker`.
+- **No Trade IF**:
+  - Net edge fails both thresholds.
+
+---
+
+## G. DYNAMIC POSITION SIZING BLOCK
+
+Bounded, deterministic, and regime-aware sizing calculation.
+
+**Components:**
+- `base_notional = RiskConfig.risk_per_trade_pct * equity * multiplier`.
+- `regime_mult`: Trend = 1.0, Range = 0.75, Shock = 0.30, Dead = 0.50.
+- `exec_qual_mult`: Max(0.5, `execution_quality_score`).
+- `confidence_mult`: Direct mapping from `policy.confidence` (e.g., `max(0.0, min(1.0, conf / 0.8))`).
+- `setup_mult`: Soft veto applies `0.5`, else `1.0`.
+
+**Formula:**
+`target_notional = base_notional * regime_mult * exec_qual_mult * confidence_mult * setup_mult`.
+
+**Safety Caps:**
+- Clamp: [clamp(target_notional, min_notional, max_notional)](file:///C:/Bot%20mk3/crates/bot-data/tests/feature_diagnostics.rs#209-213).
+- If `target_notional < min_notional_per_order/2`, return **NoTrade**.
+
+---
+
+## H. SETUP-AWARE STOP POLICY
+
+Dynamic stops based on conditions, not a hardcoded 50 bps.
+
+**Formulas:**
+- Base: `volatility_proxy = max(rv_5m_bps, ema_rv_slow)`.
+- `sl_dist_bps = (volatility_proxy * regime_vol_multiplier) + (spread_bps * 1.5)`.
+- `regime_vol_multiplier`: Trend = 1.2, Range = 0.8, Shock = 2.0.
+
+**Veto Gate:**
+- If computed `sl_dist_bps > max_allowed_sl_bps`, **HARD VETO** (setup is too volatile to safely cover).
+
+---
+
+## I. RISK-OFF / FIREWALL HARDENING
+
+Enhance `GateReason` and [RiskGate](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/gate.rs#20-35) with hysteresis.
+
+**Core Additions:**
+- **Consecutive Losses Cooldown**: Track real PnL results. E.g., 3 consecutive losers -> `GateReason::ConsecutiveLoss_Cooldown` for 300 seconds.
+- **Risk States**: `enum RiskMode { Normal, ReducedRisk, MakerOnly, RiskOff, Recovery }`.
+- **Hysteresis Recovery**: When returning from `RiskOff` or `Cooldown`, transition to `RiskMode::Recovery` for `N` trades, enforcing `setup_mult = 0.5`. Do not transition back to `Normal` until `N` recovery trades are profitable or timeout expires cleanly.
+
+---
+
+## J. MODULE / FILE CHANGE PLAN
+
+1. **`bot-server/src/services/orchestrator/execution_quality.rs`** [NEW]
+   - Houses `ExecutionQualityBlock` (B).
+2. **`bot-server/src/services/orchestrator/cost_model.rs`** [NEW]
+   - Houses `ExpectedTradeCost` and `ExpectedNetEdge` logic (C, D).
+3. **`bot-server/src/services/orchestrator/sizing.rs`** [NEW]
+   - Extracts and encapsulates dynamic sizing logic from [risk.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs) (G).
+4. **`bot-server/src/services/orchestrator/stop_policy.rs`** [NEW]
+   - Computes initial Stop limits dynamically (H).
+5. **[bot-server/src/services/orchestrator/commission.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/commission.rs)** [UPDATE]
+   - Integrate net edge checks into `OrderPolicy::decide` (F).
+6. **[bot-server/src/services/orchestrator/gate.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/gate.rs)** [UPDATE]
+   - Add Losses Cooldown and `RiskMode` hysteresis logic (E, I).
+7. **[bot-server/src/services/orchestrator/agent.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/agent.rs)** [UPDATE]
+   - Pre-computation wiring. Call cost model, exec quality, net edge prior to submit_order / infer action usage. 
+
+---
+
+## K. TYPE / STRUCT / ENUM DESIGN
+
+```rust
+pub struct ExpectedTradeCost {
+    pub fee_bps_est: f64,
+    pub spread_cost_bps_est: f64,
+    pub slippage_bps_est: f64,
+    pub adverse_selection_bps_est: f64,
+    pub total_cost_bps_est: f64,
+}
+
+pub struct ExpectedNetEdge {
+    pub expected_move_bps: f64,
+    pub net_edge_bps: f64,
+    pub passes_threshold: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EntryMode { Maker, Taker, NoTrade }
+
+#[derive(Debug, Clone)]
+pub struct DynamicSizingResult {
+    pub target_qty: f64,
+    pub target_notional: f64,
+    pub regime_mult: f64,
+    pub base_size: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RiskMode {
+    Normal,
+    Reduced,
+    MakerOnly,
+    RiskOff,
+    Recovery { trades_remaining: u32 }
+}
+```
+
+---
+
+## L. METRICS / DIAGNOSTICS / TEST PLAN
+
+**Logging / Diagnostics:**
+- Must push `{ expected_edge, total_costs, veto_reason, exec_qual_score, regime_mult }` to `OrchestratorEvent::Metrics` dictionary to ensure it prints to GUI / backtest pipeline.
+
+**Tests:**
+- **Unit**:
+  - `test_cost_model_spread_symmetric`: Verify Maker gets negative spread cost offset, Taker gets partial spread width.
+  - `test_net_edge_veto`: High predicted move but excessive costs must output `passes_threshold = false`.
+  - `test_dynamic_sizing_clamping`: Shock regime + Low Conf should hit `min_notional` boundary or `NoTrade`.
+  - `test_recovery_hysteresis`: State machine correctly enters `Recovery` after `ConsecutiveLossesCooldown`.
+
+---
+
+## M. SCHEMA IMPACT
+
+**No Observation Schema Changes required.**
+Sprint 3 logic is strictly execution-layer processing, taking the existing 148-dimension `schema v6` as input and logging its decisions internally via [OrchestratorEvent](file:///C:/Bot%20mk3/proto/bot_orchestrator_chunk.proto#99-107). Models do not require retraining unless `ExpectedMove_bps` calibration cannot map linearly from existing logits.
+
+---
+
+## N. IMPLEMENTATION ORDER
+
+1. Audit existing [gate.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/gate.rs) & execution logic mappings (Completed).
+2. Define `Sprint3Thresholds` and core Structs (`cost_model.rs`, `execution_quality.rs`).
+3. Implement Expected Trade Cost model (C).
+4. Implement Pre-trade Execution Quality scoring (B).
+5. Implement Expected Net Edge gate (D).
+6. Implement Entry Veto & Maker/Taker Policy logic in [commission.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/commission.rs) (E, F).
+7. Implement Dynamic Sizing in `sizing.rs` (G).
+8. Implement Setup-Aware Stop Policy (H).
+9. Refactor [gate.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/gate.rs) with `RiskMode` hysteresis & loss cooldown (I).
+10. Wire outputs into [agent.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/agent.rs) pre-action pipeline.
+11. Build Unit tests for boundary conditions (L).
+12. Check Golden tests / Replay sanity.
+
+---
+
+## O. QUICK WINS / MEDIUM / HIGHER-RISK ITEMS
+
+- **QUICK_WINS**: 
+  - Execution Quality Scoring and spread depth vetoes (highly deterministic, easy to unit test).
+  - Cost Model fee/spread estimation.
+- **MEDIUM**:
+  - Bounded Dynamic sizing.
+  - RiskMode Hysteresis (requires careful state transitions in [gate.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/gate.rs)).
+- **HIGHER_RISK**:
+  - Net Edge Calibration: Mapping the ML model output [value](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/leverage.rs#655-674) or `logit` predictably to roughly-calibrated `expected_move_bps`. This requires tuning the threshold scaling.
+
+---
+
+## P. EXPLICIT ASSUMPTIONS
+
+1. **ASSUMPTION:** The standard ML policy outputs a [value](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/leverage.rs#655-674) metric or logit that can be linearly mapped to `expected_move_bps` using a configurable calibration scalar.
+2. **ASSUMPTION:** Execution Interface allows asynchronous sizing/limit price generation without introducing intolerable intra-tick latency over websocket.
+3. **ASSUMPTION:** Existing Backtester framework can intercept new `EntryMode::Maker` limits directly through the existing [CommissionPolicy](file:///C:/Bot%20mk3/proto/bot.proto#789-806) bridging logic without needing a rewrite of the simulator's fill rules.

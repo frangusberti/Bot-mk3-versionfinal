@@ -1,0 +1,154 @@
+# Sprint 1 Final — Data Inventory (v5.1)
+
+**59 features | OBS_DIM = 118 | OBS_SCHEMA_VERSION = 5**
+
+## Schema Diff from v4 → v5.1
+
+```diff
+Features: 38 → 59 (+21 net)
+OBS_DIM: 76 → 118
+Added: 22 new features
+Removed: 1 (taker_buy_ratio_5s — algebraically redundant)
+Fixed: OI delta clamp ±1.0 → ±20.0%
+```
+
+## Feature Inventory
+
+### A) Price/Spread (slots 0–3)
+
+| Slot | Feature | Formula | Unit | Window | Clamp | Invalidation |
+|---|---|---|---|---|---|---|
+| 0 | [mid_price](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/mod.rs#409-413) | [(bid+ask)/2](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | USD | instant | raw | `None` if no BBO |
+| 1 | `spread_abs` | `ask-bid` | USD | instant | raw | `None` if no BBO |
+| 2 | `spread_bps` | `spread_abs/mid*10000` | bps | instant | raw | `None` if no BBO |
+| 3 | **`spread_vs_baseline`** ★ | [(spread_bps-μ)/σ](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | z-score | 120-sample EWMA | ±5.0 | `None` until EWMA ready |
+
+### B) Returns & Volatility (slots 4–13)
+
+| Slot | Feature | Formula | Unit | Window | Clamp | Invalidation |
+|---|---|---|---|---|---|---|
+| 4 | `ret_1s` | `ln(mid[t]/mid[t-1])` | log return | 1 tick | ±1.0 | `None` if <1 sample |
+| 5 | **`ret_3s`** ★ | `ln(mid[t]/mid[t-3])` | log return | 3 ticks | ±1.0 | `None` if <3 samples |
+| 6 | `ret_5s` | `ln(mid[t]/mid[t-5])` | log return | 5 ticks | ±1.0 | `None` if <5 samples |
+| 7 | **`ret_10s`** ★ | `ln(mid[t]/mid[t-10])` | log return | 10 ticks | ±1.0 | `None` if <10 samples |
+| 8 | `ret_30s` | `ln(mid[t]/mid[t-30])` | log return | 30 ticks | ±1.0 | `None` if <30 samples |
+| 9 | **[rv_5s](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/compute_price.rs#159-168)** ★ | [std(ret_1s[t-5..t])](file:///C:/Bot%20mk3/crates/bot-data/tests/feature_diagnostics.rs#180-187) | std dev | 5-sample | ±1.0 | `None` if <5 returns |
+| 10 | [rv_30s](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/warmup.rs#35-39) | [std(ret_1s[t-30..t])](file:///C:/Bot%20mk3/crates/bot-data/tests/feature_diagnostics.rs#180-187) | std dev | 30-sample | ±1.0 | `None` if <30 returns |
+| 11 | `rv_5m` | [std(ret_1s[t-300..t])](file:///C:/Bot%20mk3/crates/bot-data/tests/feature_diagnostics.rs#180-187) | std dev | 300-sample | ±1.0 | `None` if <300 returns |
+| 12 | **`slope_mid_5s`** ★ | [(mid[t]-mid[t-5])/mid*10000/5](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | bps/sec | 5 ticks | ±10.0 | `None` if <5 samples |
+| 13 | **`slope_mid_15s`** ★ | [(mid[t]-mid[t-15])/mid*10000/15](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | bps/sec | 15 ticks | ±10.0 | `None` if <15 samples |
+
+### C) Taker Flow (slots 14–23)
+
+| Slot | Feature | Formula | Unit | Window | Clamp | Invalidation |
+|---|---|---|---|---|---|---|
+| 14 | `taker_buy_vol_1s` | `Σ buy_qty` | qty | 1s | raw | Always present |
+| 15 | `taker_sell_vol_1s` | `Σ sell_qty` | qty | 1s | raw | Always present |
+| 16 | `taker_buy_vol_5s` | `Σ buy_qty` | qty | 5s | raw | Always present |
+| 17 | `taker_sell_vol_5s` | `Σ sell_qty` | qty | 5s | raw | Always present |
+| 18 | `tape_trades_1s` | count of trades | count | 1s | raw | Always present |
+| 19 | `tape_intensity_z` | [(count_1s-μ)/σ](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | z-score | 30-sample EWMA | ±10.0 | `None` until EWMA ready |
+| 20 | **`trade_imbalance_1s`** ★ | [(buy-sell)/(buy+sell)](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | ratio | 1s | ±1.0 | `None` if `total=0` |
+| 21 | **`trade_imbalance_5s`** ★ | [(buy-sell)/(buy+sell)](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | ratio | 5s | ±1.0 | `None` if `total=0` |
+| 22 | **`trade_imbalance_15s`** ★ | [(buy-sell)/(buy+sell)](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | ratio | 15s | ±1.0 | `None` if `total=0` |
+| 23 | **`tape_intensity_5s_z`** ★ | [(count_5s-μ)/σ](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | z-score | 30-sample EWMA | ±10.0 | `None` until EWMA ready |
+
+### D) Microstructure (slots 24–36)
+
+> All 13 features degrade atomically to `None` when OB is desynced (`strict_in_sync=false`).
+
+| Slot | Feature | Formula | Unit | Window | Clamp | Invalidation |
+|---|---|---|---|---|---|---|
+| 24 | [obi_top1](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/compute_micro.rs#212-221) | [(bid_q1-ask_q1)/(bid_q1+ask_q1)](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | ratio | instant | ±1.0 | OB desync |
+| 25 | `obi_top3` | same, Σ over top 3 | ratio | instant | ±1.0 | OB desync |
+| 26 | **[obi_top10](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/compute_micro.rs#222-234)** ★ | same, Σ over top 10 | ratio | instant | ±1.0 | OB desync |
+| 27 | [microprice](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/compute_micro.rs#264-274) | `bid*ask_q/(bid_q+ask_q)+ask*bid_q/(bid_q+ask_q)` | USD | instant | raw | OB desync |
+| 28 | `microprice_minus_mid_bps` | [(mp-mid)/mid*10000](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | bps | instant | ±1.0 | OB desync |
+| 29 | `obi_delta_5s` | `obi_top1[t]-obi_top1[t-5]` | delta | 5-tick | ±1.0 | OB desync or <5 samples |
+| 30 | **`delta_obi_top1_1s`** ★ | `obi_top1[t]-obi_top1[t-1]` | delta | 1-tick | ±1.0 | OB desync or <2 samples |
+| 31 | **`delta_microprice_1s`** ★ | [(mp[t]-mp[t-1])/mid*10000](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | bps | 1-tick | ±10.0 | OB desync or <2 samples |
+| 32 | **`depth_bid_top5`** ★ | `Σ bid_qty[1..5]` | qty | instant | raw | OB desync |
+| 33 | **`depth_ask_top5`** ★ | `Σ ask_qty[1..5]` | qty | instant | raw | OB desync |
+| 34 | **`depth_imbalance_top5`** ★ | [(Σbid-Σask)/(Σbid+Σask)](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) top 5 | ratio | instant | ±1.0 | OB desync or `total=0` |
+| 35 | **`depth_change_bid_1s`** ★ | [(depth_bid[t]-depth_bid[t-1])/depth_bid[t-1]](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | pct change | 1-tick | ±1.0 | OB desync or no previous |
+| 36 | **`depth_change_ask_1s`** ★ | same for ask | pct change | 1-tick | ±1.0 | OB desync or no previous |
+
+### E) Shocks (slots 37–43)
+
+| Slot | Feature | Formula | Unit | Window | Clamp | Invalidation |
+|---|---|---|---|---|---|---|
+| 37 | `liq_buy_vol_30s` | `Σ buy_liq_qty` | qty | 30s | raw | Always present |
+| 38 | `liq_sell_vol_30s` | `Σ sell_liq_qty` | qty | 30s | raw | Always present |
+| 39 | `liq_net_30s` | `buy-sell` | qty | 30s | raw | Always present |
+| 40 | `liq_count_30s` | count | count | 30s | raw | Always present |
+| 41 | `mark_minus_mid_bps` | [(mark-mid)/mid*10000](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | bps | instant | ±1.0 | `None` if no mark price |
+| 42 | [funding_rate](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/compute_shocks.rs#41-46) | from exchange | rate | instant | ±1.0 | `None` if never received |
+| 43 | **`funding_zscore`** ★ | [(rate-μ)/σ](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | z-score | 480-sample EWMA | ±5.0 | `None` until ~24 min warmup |
+
+### F) Technicals (slots 44–47)
+
+| Slot | Feature | Formula | Unit | Window | Clamp | Invalidation |
+|---|---|---|---|---|---|---|
+| 44 | `ema200_distance_pct` | [(mid-ema200)/ema200*100](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | % | 200 periods | ±1.0 | `None` until EMA ready |
+| 45 | `rsi_14` | Wilder's RSI | 0-100 | 14 periods | raw (fallback=50) | `None` uses fallback |
+| 46 | `bb_width` | [(upper-lower)/mid](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | ratio | 20 periods | raw | `None` until BB ready |
+| 47 | `bb_pos` | [(mid-lower)/(upper-lower)](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | position | 20 periods | ±10.0 | `None` until BB ready |
+
+### G) Account (slots 48–51)
+
+| Slot | Feature | Source | Unit | Clamp | Invalidation |
+|---|---|---|---|---|---|
+| 48 | `position_flag` | external | {-1,0,1} | raw | Always |
+| 49 | `latent_pnl_pct` | external | % | ±1.0 | Always |
+| 50 | `max_pnl_pct` | external | % | ±1.0 | Always |
+| 51 | `current_drawdown_pct` | external | % | ±1.0 | Always |
+
+### H) Time (slots 52–53)
+
+| Slot | Feature | Formula | Unit | Clamp | Invalidation |
+|---|---|---|---|---|---|
+| 52 | `time_sin` | [sin(2π * hour_frac)](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/compute_oi.rs#145-158) | [-1,1] | raw | Always |
+| 53 | `time_cos` | [cos(2π * hour_frac)](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/commission.rs#534-545) | [-1,1] | raw | Always |
+
+### I) Open Interest (slots 54–58)
+
+> Semantic: **oi_delta_* values are percentage changes** (e.g., `5.0 = 5% increase`).
+> Clamped at **±20%** to cover normal variation and extreme liquidation cascades.
+
+| Slot | Feature | Formula | Unit | Window | Clamp | Invalidation |
+|---|---|---|---|---|---|---|
+| 54 | `oi_value` | from exchange | USD | instant | raw | `None` if never received |
+| 55 | **`oi_delta_30s`** ★ | [(OI[t]-OI[t-30s])/OI[t-30s]*100](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | **% change** | 30s, min_age 25s | **±20.0** | `None` if no OI ≥25s old |
+| 56 | **`oi_delta_1m`** ★ | same formula | **% change** | 60s, min_age 50s | **±20.0** | `None` if no OI ≥50s old |
+| 57 | `oi_delta_5m` | same formula | **% change** | 5m, min_age 4.5m | **±20.0** | `None` if no OI ≥4.5m old |
+| 58 | `oi_zscore_30m` | [(OI-μ)/σ](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#314-318) | z-score | 30-min EWMA | ±10.0 | `None` until EWMA ready |
+
+★ = New in Sprint 1
+
+---
+
+## Post-Fix Diagnostic Validation
+
+```
+599 rows emitted, 59 × 599 = 35,341 data points
+All sanity checks passed ✅
+```
+
+**OI Delta Fix Confirmed:**
+
+| Feature | Before (v5.0) | After (v5.1) |
+|---|---|---|
+| `oi_delta_30s` Clamp% | 91.3% ❌ | **0.0%** ✅ |
+| `oi_delta_1m` Clamp% | 91.7% ❌ | **0.0%** ✅ |
+| `oi_delta_5m` Clamp% | 54.9% ❌ | **0.0%** ✅ |
+
+**Redundancy Removal Confirmed:**
+- `taker_buy_ratio_5s ↔ trade_imbalance_5s` ρ=1.000 pair eliminated
+- Remaining highest pairwise ρ among new features: `depth_change_bid ↔ depth_change_ask` = 0.981 (synthetic artifact)
+
+**Block Coverage (post-fix):**
+
+| Block | Count | None% | Clamp% |
+|---|---|---|---|
+| C) Taker Flow | 10 | 1.5% | 0.0% |
+| I) OI | 5 | 31.5% | **0.0%** |

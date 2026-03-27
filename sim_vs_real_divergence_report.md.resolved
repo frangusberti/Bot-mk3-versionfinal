@@ -1,0 +1,48 @@
+# Sim Vs Real Divergence Validation Report
+
+## Context
+During the audit of BOTMK3's live readiness and maker execution realism, we identified the need for a mechanism to monitor **"Shadow Mode" divergence**. Backtest results, no matter how conservative, can only approximate the Binance USDⓈ-M Futures matching engine.
+
+To confidently transition to live trading, we must measure the exact discrepancies between our simulated execution logic and reality.
+
+## Implementation Details
+
+We have successfully injected [SimVsRealDivergence](file:///C:/Bot%20mk3/crates/bot-server/src/services/analytics/engine.rs#50-64) tracking into the core execution orchestrator. 
+
+### Mechanism
+
+1. **Dual Engine Mode:** When the user initiates a run with `mode="PAPER"`, the Orchestrator instantiates `bot_data::simulation::execution::ExecutionEngine`. This maintains the canonical "paper" position based on the local order book and the conservative maker queue model.
+2. **Shadow Feed Injection:** Even in `PAPER` mode, if Binance API keys are present, the Orchestrator explicitly spawns the Live User Data Stream listening for real account `ExecutionReport` events.
+3. **Divergence Emission:**
+   - Real fills arriving from the User Data Stream are dispatched to the [SymbolAgent](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/agent.rs#49-97) as `AgentEvent::RealFillForDivergence(exec_record)`.
+   - The Agent intercepts these events and queries the internal [ExecutionEngine](file:///C:/Bot%20mk3/crates/bot-data/src/simulation/execution.rs#6-28) to obtain the simulated entry price, quantity, and accumulated fees.
+   - It computes the difference and emits an `AnalyticsEvent::SimVsRealDivergence`.
+4. **Analytics Persistence:** The [AnalyticsEngine](file:///C:/Bot%20mk3/crates/bot-server/src/services/analytics/engine.rs#100-105) intercepts these divergence payloads and aggregates them across the session. Upon session termination, it persists them alongside trade histories into a new file: `divergence.json`.
+
+### Telemetry Structure ([SimVsRealDivergence](file:///C:/Bot%20mk3/crates/bot-server/src/services/analytics/engine.rs#50-64))
+
+```rust
+pub struct SimVsRealDivergence {
+    pub symbol: String,
+    pub order_id: String,
+    pub event_ts: i64,
+    pub side: Side,
+    pub order_type: OrderType,
+    pub expected_price: f64,    // paper simulation price
+    pub expected_qty: f64,      // paper simulation fill qty
+    pub expected_fee: f64,      // paper simulation fee
+    pub realized_price: Option<f64>,  // true exchange price
+    pub realized_qty: f64,      // true fill qty
+    pub realized_fee: f64,      // true fee
+    pub delay_ms: i64,          // time from paper fill to real fill (or vice versa)
+}
+```
+
+## Validation & Usage
+
+This setup empowers quantitative researchers and engineers to:
+1. Run the bot with small real capital while the internal logic operates under identical conditions.
+2. Cross-reference `divergence.json` against `trades.json` to identify systematic biases (e.g. Maker order queue wait time under-estimation).
+3. Continually calibrate the local `SlippageModel::ConservativeMaker` and `latency_ms` constants to drive the divergence mathematically towards zero.
+
+**Front C complete.** The system is now ready for pre-live hardening and shadow-mode testing.

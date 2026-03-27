@@ -1,0 +1,144 @@
+
+// --- Orchestrator Service ---
+
+service AnalyticsService {
+    rpc GetSessionMetrics(SessionRequest) returns (SessionMetricsResponse);
+    rpc GetEquityCurve(SessionRequest) returns (EquityCurveResponse);
+    rpc ListSessions(Empty) returns (SessionListResponse);
+}
+
+message SessionRequest {
+    string session_id = 1;
+}
+
+message SessionMetricsResponse {
+    double total_return = 1;
+    double max_drawdown = 2;
+    double sharpe_ratio = 3;
+    double profit_factor = 4;
+    double win_rate = 5;
+    double total_fees = 6;
+    uint64 total_trades = 7;
+}
+
+message EquityCurveResponse {
+    repeated EquityPoint points = 1;
+}
+
+message EquityPoint {
+    int64 timestamp = 1;
+    double equity = 2;
+    double cash = 3;
+    double unrealized_pnl = 4;
+}
+
+message SessionListResponse {
+    repeated string session_ids = 1;
+}
+
+// Existing Orchestrator Service
+service OrchestratorService {
+    rpc StartOrchestrator(StartOrchestratorRequest) returns (StartOrchestratorResponse);
+    rpc StopOrchestrator(StopOrchestratorRequest) returns (StopOrchestratorResponse);
+    rpc GetOrchestratorStatus(GetOrchestratorStatusRequest) returns (OrchestratorStatus);
+    rpc StreamOrchestratorEvents(StreamOrchestratorEventsRequest) returns (stream OrchestratorEvent);
+    rpc SetMode(SetModeRequest) returns (SetModeResponse);
+    rpc UpdateConfig(UpdateConfigRequest) returns (UpdateConfigResponse);
+}
+
+message StartOrchestratorRequest {
+    repeated SymbolConfig symbols = 1;
+    string dataset_id = 2; // Optional for replay
+    OrchestratorConfig config = 3;
+    string mode = 4; // "PAPER", "LIVE"
+    bool allow_live = 5; // Must be true for LIVE
+}
+
+message StartOrchestratorResponse {
+    string run_id = 1;
+    string status = 2;
+}
+
+message StopOrchestratorRequest {
+    string run_id = 1;
+}
+
+message StopOrchestratorResponse {
+    string status = 1;
+}
+
+message GetOrchestratorStatusRequest {}
+
+message OrchestratorStatus {
+    string state = 1; // "RUNNING", "STOPPED"
+    string mode = 2; // "PAPER", "LIVE"
+    int64 start_time = 3;
+    double global_equity = 4;
+    double global_cash = 5;
+    double global_exposure = 6;
+    double global_exposure_frac = 7;
+    double max_dd_seen = 8;
+    repeated SymbolStatus symbols = 9;
+}
+
+message SymbolStatus {
+    string symbol = 1;
+    string position_side = 2;
+    double position_qty = 3;
+    double entry_price = 4;
+    double unrealized_pnl = 5;
+    double equity_alloc_used = 6;
+    int64 last_decision_ts = 7;
+    string last_action = 8;
+    double event_rate = 9;
+    string status = 10; // active, error
+}
+
+message StreamOrchestratorEventsRequest {}
+
+message OrchestratorEvent {
+    int64 ts = 1;
+    string level = 2; // "INFO", "WARN", "ERROR", "CRITICAL"
+    string type = 3; // "DECISION", "ORDER", "FILL", "RISK", "MODE", "HEALTH"
+    string symbol = 4; // Optional
+    string message = 5;
+    string payload_json = 6;
+}
+
+message SetModeRequest {
+    string mode = 1;
+    bool confirm_live = 2;
+}
+
+message SetModeResponse {
+    string old_mode = 1;
+    string new_mode = 2;
+}
+
+message UpdateConfigRequest {
+    OrchestratorConfig config = 1;
+    repeated SymbolConfig symbol_updates = 2;
+}
+
+message UpdateConfigResponse {
+    bool success = 1;
+}
+
+message SymbolConfig {
+    string symbol = 1;
+    int32 decision_interval_ms = 2;
+    double max_pos_frac = 3;
+    reserved 4;  // was leverage_declared (dead field)
+    string policy_id = 5;
+    string exec_mode = 6; // "MARKET", "MAKER", "HYBRID"
+}
+
+message OrchestratorConfig {
+    double max_daily_drawdown_frac = 1;
+    double max_total_exposure_frac = 2;
+    double fee_buffer_frac = 3;
+    string risk_preset = 4; // "CONSERVATIVE", "BALANCED", "AGGRESSIVE"
+    bool paper_can_run_when_live_stopped = 5;
+    bool enable_live_kill_switch = 6;
+    double volatility_adapt_strength = 7;
+}

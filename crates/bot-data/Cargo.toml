@@ -1,0 +1,37 @@
+[package]
+name = "bot-data"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+tokio-tungstenite = { version = "0.20", features = ["native-tls"] }
+futures-util = "0.3"
+url = "2.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+bot-core = { path = "../bot-core" }
+anyhow = "1.0"
+async-trait = "0.1"
+parquet = { version = "53.0", features = ["arrow", "snap"] }
+arrow = { version = "53.0", features = ["chrono-tz"] }
+rust_decimal = { version = "1.33", features = ["serde"] }
+uuid = { version = "1.6", features = ["v4"] }
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+sha1 = "0.10"
+reqwest = { version = "0.13.2", features = ["json"] }
+thiserror = "1.0"
+flate2 = "1.1.9"
+rand = "0.8"
+rust_decimal_macros = "1.33"
+
+[dev-dependencies]
+tempfile = "3.8"
+
+[[bin]]
+name = "parity_tool"
+path = "src/reporting/parity_cli.rs"

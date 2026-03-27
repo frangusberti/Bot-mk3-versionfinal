@@ -1,0 +1,33 @@
+# Task: vNext Pilot Launch
+
+- [x] vNext Implementation (reward.rs, rl.rs, proto, grpc_env.py, ppo_vnext.py)
+- [x] Gate Telemetry
+- [x] Build & Deploy
+- [x] Phase 2: Exploration Bridge
+- [x] Phase 3: Real-World Hardening (Adversarial Evaluation)
+- [x] Phase 3.5: Position / Exit Architecture Refactor
+    - [x] Refactor [bot.proto](file:///c:/Bot%20mk3/proto/bot.proto) (10-action distribution)
+    - [x] Implement Lifecycle Logic in [rl.rs](file:///c:/Bot%20mk3/crates/bot-server/src/services/rl.rs) (OPEN/ADD/REDUCE/CLOSE)
+    - [x] Implement Profit Floor (10 bps gate)
+    - [x] Update Python Environment ([grpc_env.py](file:///c:/Bot%20mk3/python/bot_ml/grpc_env.py))
+    - [x] Create [ppo_vnext_p3_5.py](file:///c:/Bot%20mk3/python/ppo_vnext_p3_5.py)
+    - [x] Rebuild and Verify Full Loop (Profit Floor Gating confirmed)
+- [x] Foundational Architecture Audit (Verdict: FAIL)
+- [x] Phase 3.6: Foundational Architecture Correction
+    - [x] Update `Agent.rs` to 10-action distribution
+    - [x] Guard [PortfolioManager](file:///c:/Bot%20mk3/crates/bot-data/src/simulation/portfolio.rs#4-7) against blind reversals
+    - [x] Unify Risk Gates (Profit Floor/SL) in [RiskManager](file:///c:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#350-385)
+- [x] Phase 4: Selective Entry Gating & Lifecycle Validation
+    - [x] Update [bot.proto](file:///c:/Bot%20mk3/proto/bot.proto) (SEG config + Lifecycle metrics)
+    - [x] Implement [check_entry_allowed](file:///c:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#715-746) in [RiskManager](file:///c:/Bot%20mk3/crates/bot-server/src/services/orchestrator/risk.rs#350-385)
+    - [x] Add Lifecycle Telemetry (EpisodeHandle tracking)
+    - [x] Integrate SEG in [rl.rs](file:///c:/Bot%20mk3/crates/bot-server/src/services/rl.rs) and `Agent.rs`
+    - [x] Verify Scorecard reporting via Audit
+
+- [x] Behavioral Audit Run (Phase 4 Validation) [x]
+    - [x] Update Python Environment ([grpc_env.py](file:///c:/Bot%20mk3/python/bot_ml/grpc_env.py)) [x]
+    - [x] Update Audit Script ([ppo_eval_checkpoint.py](file:///c:/Bot%20mk3/python/ppo_eval_checkpoint.py)) [x]
+    - [x] Regenerate gRPC Python Stubs [x]
+    - [x] Run 10k Smoke Test [x]
+    - [x] Run 50k Behavioral Audit [x]
+    - [x] Final Behavioral Diagnosis & Performance Audit [x]

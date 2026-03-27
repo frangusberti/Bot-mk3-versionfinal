@@ -1,0 +1,18 @@
+
+// --- Policy Service ---
+
+service PolicyService {
+    rpc Infer(InferRequest) returns (InferResponse);
+}
+
+message InferRequest {
+    string run_id = 1;
+    string policy_id = 2;
+    string symbol = 3;
+    Observation obs = 4;
+}
+
+message InferResponse {
+    Action action = 1;
+    repeated float logits = 2;
+}

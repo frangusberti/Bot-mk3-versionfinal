@@ -1,0 +1,43 @@
+# BOTMK3 Feature Engine — Task Checklist
+
+## Phase 1 — Dynamic Features & Temporal Context
+- [x] Sprint 1: Quick Win features (59 features, schema v5, CLOSED)
+
+- [x] Sprint 2: Interpretation Layer (15 new features → 74 total, schema v6)
+  - [x] Step 1: [BoolRingBuffer](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/buffers.rs#449-453) in [buffers.rs](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/buffers.rs) + tests
+  - [x] Step 2: [compute_persistence.rs](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/compute_persistence.rs) (7 features) + tests
+  - [x] Step 3: [compute_absorption.rs](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/compute_absorption.rs) (4 features) + tests
+  - [x] Step 4: [compute_regime.rs](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/compute_regime.rs) (4 scores + enum) + tests
+  - [x] Step 5: [schema.rs](file:///C:/Bot%20mk3/crates/bot-data/src/features_v2/schema.rs) (+15 fields, OBS_DIM=148, v6)
+  - [x] Step 6: [mod.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/mod.rs) wiring + Sprint2Thresholds
+  - [x] Step 7: [health.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/health.rs) (NUM_FEATURES=74)
+  - [x] Step 8: Diagnostic test update + rerun
+  - [x] Step 9: Inventory update
+
+- [x] Sprint 3: Execution & Risk (CLOSED)
+  - [x] Phase 1: Blueprint Design & Codebase Audit
+  - [x] Phase 2: Expected Trade Cost & Execution Quality Models
+  - [x] Phase 3: Net Edge Gate & Veto Policies
+  - [x] Phase 4: Maker/Taker & Dynamic Sizing Rules
+  - [x] Phase 5: Setup-Aware Stop Policy & Risk-Off Hardening
+  - [x] Phase 6: Core Integration & Verification
+    - [x] Integrate [ExecutionQualityBlock](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/execution_quality.rs#29-30) in [agent.rs](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/agent.rs).
+    - [x] Integrate [CostModelBlock](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/cost_model.rs#45-46) and Expected Net Edge evaluation.
+    - [x] Wire [DynamicSizingBlock](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/sizing.rs#40-41) to `target_qty` calculations.
+    - [x] Wire [StopPolicyBlock](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/stop_policy.rs#32-33) evaluation (log informational vetos).
+    - [x] Ensure [ExecutionQuality](file:///C:/Bot%20mk3/crates/bot-server/src/services/orchestrator/execution_quality.rs#29-30) and Sizing vetos abort `OPEN` orders.
+    - [x] Verify complete workflow integration.
+    - [x] Run `cargo check` and `cargo test` to ensure stability.
+  - [x] Phase 7: User-Requested Revisions (Completed)
+    - [x] `expected_move_bps` explicit calibration.
+    - [x] Maker cost conservatism and adverse selection penalty.
+    - [x] `DeadMarket` strict default handling (No-Trade).
+    - [x] Confidence multiplier bounded binary gating.
+    - [x] Recovery logic path-independence.
+    - [x] End-to-end exact decision diagnostics logging.
+- [ ] Sprint 4: Validation (ACTIVE)
+  - [x] Phase 1: Golden Tests (Schema v6 checksums & Leakage Audits)
+  - [x] Phase 2: Metrics Upgrade & PnL Decomposition
+  - [x] Phase 3: Walk-Forward Engine & Ablation Wiring
+  - [x] Phase 4: Python Reporting Matrix Generation
+  - [x] Phase 5: Final Baseline Evaluation Run

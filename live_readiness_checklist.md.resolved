@@ -1,0 +1,30 @@
+# BOTMK3 Live-Readiness Framework
+
+To transition from Phase 3 (Pre-Live Hardening) to Phase 4 (Live Production Trading), the system must explicitly satisfy strict criteria governing regime exposure, latency tolerance, slip targets, and divergence thresholds.
+
+## 1. Required Execution Telemetry Parameters
+Before going Live, BOTMK3 must operate in **PAPER** (Shadow Mode) for a minimum period (or N required trips) to gather [SimVsRealDivergence](file:///C:/Bot%20mk3/crates/bot-server/src/services/analytics/engine.rs#50-64) JSON payloads.
+
+### Defined Thresholds
+*   **Max Wait Latency:** Orders must not routinely wait longer in Maker Queue than local matching simulates. The local `latency_ms` offset must encompass the 95th percentile `delay_ms` of real Maker fills.
+*   **Expected Value Divergence Tolerance:**
+    *   Maximum net EV divergence from local `ConservativeMaker` must be **< 15%** of gross PnL on a minimum sample size of **N=250** round trips.
+    *   Aggregation method: `SUM(expected_fee + expected_pnl) / SUM(realized_fee + realized_pnl)`.
+*   **Maker Slip:** Allowed slippage on expected Maker behavior is ≤ 0.2 bps per trip.
+    
+## 2. Regime Diversity Constraints
+A raw trade count is insufficient. The shadow run *must* demonstrate profitable survival across shifting liquidity regimes.
+*   **Trend Acceleration:** Min 15 trips executing during active breakout sequences without adverse selection triggering Stop-Policy rollbacks.
+*   **Dead Market / Chop:** Min 50 trips successfully held or rapidly scratched during bounded chop without excessive fee churn.
+*   **Absorption / Reversal:** The Risk Gate must correctly block at least 15 entry signals where high adverse liquidity (Absorption metric) triggers rejection.
+
+## 3. The Objective Go-Live Checklist
+
+- [ ] **Data Pipeline Hardening:** Python offline alignment is identical to Rust Real-time layout (Trace Audit approved).
+- [ ] **Conservative Maker Calibrated:** Queue position depletion matches real exchange behavior without overly optimistic fills.
+- [ ] **Shadow Mode Exposure:** System accumulated N >= 250 round trips in `PAPER` mode overlapping the live depth feed.
+- [ ] **Shadow EV Constraint:** Total expected simulated PnL diverges by less than 15% from the Realized Exchange shadow feed.
+- [ ] **System Integrity:** Zero system panics, zero memory leaks, and zero unsynched state alerts over a continuous 72-hour period.
+- [ ] **Veto Threshold Check:** No ablation layers deactivated purely to chase backtest yield; all risk flags and cooldowns remain active.
+
+Upon satisfying these conditions, the `Config::mode` can be safely promoted to `LIVE`.

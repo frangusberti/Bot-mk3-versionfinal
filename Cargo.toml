@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "crates/bot-core",
+    "crates/bot-data",
+    "crates/bot-engine",
+    "crates/bot-server",
+    "ui/src-tauri",
+]
+resolver = "2"

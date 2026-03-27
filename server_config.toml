@@ -1,0 +1,27 @@
+[auto_train]
+enabled = true
+interval_minutes = 60
+min_new_files = 5
+train_window_hours = 24
+max_steps_per_cycle = 100000
+dry_run = false                 # Set to false to enable automatic deployment
+evaluation_window_hours = 12
+symbol = "BTCUSDT"
+max_models_per_day = 3
+
+[paths]
+experience_root = "runs"
+models_root = "models"
+registry_root = "models/registry"
+
+[recorder.payload]
+agg_trade = "full"
+depth = "full"
+book_ticker = "sample"
+mark_price = "sample"
+
+[retention]
+hot_window_days = 3
+warm_window_days = 30
+check_interval_hours = 24
+dry_run = true

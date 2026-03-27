@@ -1,0 +1,35 @@
+# Logs
+*.log
+*.txt
+*.json
+python_run.log
+server_error.log
+server_run.log
+python_error.log
+server.log
+server_err.log
+
+# Models and Data
+models/
+python/runs_train/
+runs/
+data/
+**/data/
+**/*.zip
+**/*.pkl
+**/*.parquet
+**/*.jsonl
+**/*.csv
+**/*.xlsx
+
+# Rust
+target/
+**/*.rs.bk
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Protobuf generated
+*_pb2.py
+*_pb2_grpc.py
