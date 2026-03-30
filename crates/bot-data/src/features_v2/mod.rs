@@ -232,17 +232,16 @@ impl FeatureEngineV2 {
                             // Seed the orderbook with BBO if it's the only data we have (L1 fallback)
                             // Only do this if we don't have a more complete book already.
                             if self.ob.status == OrderBookStatus::Desynced || self.ob.status == OrderBookStatus::WaitingForSnapshot {
-                                if let Some(update_id) = ticker.update_id {
-                                    if update_id > 0 {
-                                        use rust_decimal::Decimal;
-                                        use rust_decimal::prelude::FromPrimitive;
-                                        let b_dec = Decimal::from_f64(bid).unwrap_or_default();
-                                        let a_dec = Decimal::from_f64(ask).unwrap_or_default();
-                                        let bq_dec = Decimal::from_f64(bq).unwrap_or_default();
-                                        let aq_dec = Decimal::from_f64(aq).unwrap_or_default();
-                                        
-                                        self.ob.apply_snapshot(update_id, vec![(b_dec, bq_dec)], vec![(a_dec, aq_dec)]);
-                                    }
+                                let update_id = ticker.update_id.unwrap_or(1);
+                                if update_id >= 0 {
+                                    use rust_decimal::Decimal;
+                                    use rust_decimal::prelude::FromPrimitive;
+                                    let b_dec = Decimal::from_f64(bid).unwrap_or_default();
+                                    let a_dec = Decimal::from_f64(ask).unwrap_or_default();
+                                    let bq_dec = Decimal::from_f64(bq).unwrap_or_default();
+                                    let aq_dec = Decimal::from_f64(aq).unwrap_or_default();
+                                    
+                                    self.ob.apply_snapshot(update_id, vec![(b_dec, bq_dec)], vec![(a_dec, aq_dec)]);
                                 }
                             }
                         }

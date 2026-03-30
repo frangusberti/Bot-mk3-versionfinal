@@ -111,13 +111,13 @@ ACTION_LABELS = {
 @dataclass
 class TeacherParams:
     # Spread gates
-    min_spread_bps: float = 0.5     # Calibration: V2 lowered from 1.5 to 0.5
+    min_spread_bps: float = 0.01     # Lowered for tight BTCUSDT markets
     max_spread_bps: float = 15.0    
     spread_max_hard: float = 25.0   
 
     # Regime gates
     shock_threshold: float = 0.60   
-    dead_threshold:  float = 0.85   # Calibration: V2 raised from 0.5 to 0.85
+    dead_threshold:  float = 0.85   
 
     # Deterioration gates
     spread_deterioration_threshold: float = 0.75  
@@ -131,7 +131,7 @@ class TeacherParams:
     rv_high: float = 0.30  
 
     # Decision thresholds
-    no_trade_threshold:  float = 0.65  # Calibration: V2 raised from 0.55 to 0.65
+    no_trade_threshold:  float = 0.40  # Lowered for more activity
     bid_min_threshold:   float = 0.55
     ask_min_threshold:   float = 0.55
     cancel_threshold:    float = 0.50

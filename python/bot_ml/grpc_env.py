@@ -71,8 +71,12 @@ class GrpcTradingEnv(gym.Env):
         reward_as_horizon_ms: int = 0,
         use_selective_entry: bool = False,
         entry_veto_threshold_bps: float = 1.0,
+        reward_thesis_decay_weight: float = 0.0,
+        micro_strict: bool = True,
+        **kwargs
     ):
         super().__init__()
+        self.micro_strict = micro_strict
 
         self.server_addr = server_addr
         self.dataset_id = dataset_id
@@ -147,6 +151,8 @@ class GrpcTradingEnv(gym.Env):
             entry_veto_threshold_bps=entry_veto_threshold_bps,
             profit_floor_bps=profit_floor_bps,
             stop_loss_bps=stop_loss_bps,
+            reward_thesis_decay_weight=reward_thesis_decay_weight,
+            micro_strict=kwargs.get("micro_strict", True),
         )
 
         self.episode_id = None
@@ -174,6 +180,10 @@ class GrpcTradingEnv(gym.Env):
             "equity": resp.state.equity if resp.state else 0.0,
             "ts": resp.obs.ts,
         }
+        if resp.info:
+            info["thesis_decay_penalty"] = getattr(resp.info, "thesis_decay_penalty", 0.0)
+            info["is_invalid"] = getattr(resp.info, "is_invalid", False)
+            info["mid_price"] = getattr(resp.info, "mid_price", 0.0)
         if resp.feature_health:
             info["feature_health"] = {
                 "obs_quality": resp.feature_health.obs_quality,
@@ -218,6 +228,8 @@ class GrpcTradingEnv(gym.Env):
             info["gate_imbalance_blocked"] = getattr(resp.info, "gate_imbalance_blocked", 0)
             info["exit_blocked_1_to_4_count"] = getattr(resp.info, "exit_blocked_1_to_4_count", 0)
             info["opportunity_lost_count"] = getattr(resp.info, "opportunity_lost_count", 0)
+            info["thesis_decay_penalty"] = getattr(resp.info, "thesis_decay_penalty", 0.0)
+            info["is_invalid"] = getattr(resp.info, "is_invalid", False)
             
             # Phase 4 Lifecycle Telemetry
             info["action_counts"] = dict(resp.info.action_counts) if hasattr(resp.info, "action_counts") else {}

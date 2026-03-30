@@ -381,14 +381,14 @@ impl EpisodeHandle {
         self.exec_engine.clear_all_orders()
     }
 
-    /// Returns number of trades executed.
-    fn apply_action(&mut self, action: ActionType) -> u32 {
+    /// Returns (number of trades executed, was_invalid_action).
+    fn apply_action(&mut self, action: ActionType) -> (u32, bool) {
         self.exec_engine.clear_step_stats();
         self.cancel_count_in_step = 0;
         self.reprice_count_in_step = 0;
         
         let mid = self.last_mid_price;
-        if mid <= 0.0 { return 0; }
+        if mid <= 0.0 { return (0, false); }
 
         let current_pos = self.exec_engine.portfolio.state.positions.get(&self.symbol);
         let (has_pos, pos_side, pos_qty, _upnl) = match current_pos {
@@ -400,8 +400,7 @@ impl EpisodeHandle {
         let equity = self.exec_engine.portfolio.state.equity_usdt;
         let base_notional = self.max_pos_frac * equity;
         
-        // Dynamic sizing logic (kept from vNext P3)
-        // ... (sizing multipliers omitted for brevity in design, but kept in logic)
+        // ... sizing logic
         let f = self.last_features.clone().unwrap_or_default();
         let sho = f.regime_shock.unwrap_or(0.0);
         let dea = f.regime_dead.unwrap_or(0.0);
@@ -410,7 +409,7 @@ impl EpisodeHandle {
         let spread_bps = f.spread_bps.unwrap_or(0.0);
 
         let regime_mult = if sho > tre && sho > ran && sho > dea { 0.30 } 
-            else if dea > tre && dea > ran { 0.00 } 
+            else if dea > tre && dea > ran { 0.15 } // Loosened from 0.00 to allow expert trades in quiet markets
             else if ran > tre { 0.75 } else { 1.00 };
 
         let exec_qual_mult = if spread_bps > 25.0 { 0.25 } else if spread_bps > 15.0 { 0.50 } else { 1.00 };
@@ -419,97 +418,96 @@ impl EpisodeHandle {
         let target_qty = if target_notional > 0.0 { target_notional / mid } else { 0.0 };
 
         match action {
-            ActionType::Hold => 0,
+            ActionType::Hold => (0, false),
 
             ActionType::OpenLong => {
                 *self.action_counts.entry("OPEN_LONG".to_string()).or_insert(0) += 1;
-                if has_pos { log::debug!("RL_OPEN_LONG: Already in position. Use ADD."); return 0; }
+                if has_pos { 
+                    log::debug!("RL_OPEN_LONG: Already in position. Use ADD."); 
+                    return (0, true); // INVALID: Open while already in pos
+                }
                 if self.use_selective_entry {
                     let micro_diff = self.last_features.as_ref().and_then(|f| f.microprice_minus_mid_bps).unwrap_or(0.0);
                     if micro_diff < -self.entry_veto_threshold_bps {
-                        log::info!("RL_OPEN_LONG_VETO: micro={:.2}bps threshold={:.2}", micro_diff, -self.entry_veto_threshold_bps);
                         self.entry_veto_count_in_step += 1;
                         self.entry_veto_count += 1;
-                        return 0;
+                        return (0, true); // Vetoed entry is now an invalid intent
                     }
                 }
-                self.submit_passive_order(Side::Buy, target_qty)
+                (self.submit_passive_order(Side::Buy, target_qty), false)
             }
             ActionType::AddLong => {
                 *self.action_counts.entry("ADD_LONG".to_string()).or_insert(0) += 1;
-                if !has_pos || pos_side != Side::Buy { return 0; }
+                if !has_pos || pos_side != Side::Buy { return (0, true); }
                 if self.use_selective_entry {
                     let micro_diff = self.last_features.as_ref().and_then(|f| f.microprice_minus_mid_bps).unwrap_or(0.0);
                     if micro_diff < -self.entry_veto_threshold_bps {
-                        log::info!("RL_ADD_LONG_VETO: micro={:.2}bps threshold={:.2}", micro_diff, -self.entry_veto_threshold_bps);
                         self.entry_veto_count_in_step += 1;
                         self.entry_veto_count += 1;
-                        return 0;
+                        return (0, true); // Vetoed add is an invalid intent
                     }
                 }
                 let delta = (target_qty - pos_qty).max(0.0);
-                if delta > 0.0 { self.submit_passive_order(Side::Buy, delta) } else { 0 }
+                ((if delta > 0.0 { self.submit_passive_order(Side::Buy, delta) } else { 0 }), false)
             }
             ActionType::ReduceLong => {
                 *self.action_counts.entry("REDUCE_LONG".to_string()).or_insert(0) += 1;
-                if !has_pos || pos_side != Side::Buy { return 0; }
-                self.attempt_market_exit(Side::Sell, pos_qty * 0.5, self.profit_floor_bps, self.stop_loss_bps)
+                if !has_pos || pos_side != Side::Buy { return (0, true); }
+                (self.attempt_market_exit(Side::Sell, pos_qty * 0.5, self.profit_floor_bps, self.stop_loss_bps), false)
             }
             ActionType::CloseLong => {
                 *self.action_counts.entry("CLOSE_LONG".to_string()).or_insert(0) += 1;
-                if !has_pos || pos_side != Side::Buy { return 0; }
-                self.attempt_market_exit(Side::Sell, pos_qty, self.profit_floor_bps, self.stop_loss_bps)
+                if !has_pos || pos_side != Side::Buy { return (0, true); }
+                (self.attempt_market_exit(Side::Sell, pos_qty, self.profit_floor_bps, self.stop_loss_bps), false)
             }
 
             ActionType::OpenShort => {
                 *self.action_counts.entry("OPEN_SHORT".to_string()).or_insert(0) += 1;
-                if has_pos { log::debug!("RL_OPEN_SHORT: Already in position. Use ADD."); return 0; }
+                if has_pos { return (0, true); }
                 if self.use_selective_entry {
                     let micro_diff = self.last_features.as_ref().and_then(|f| f.microprice_minus_mid_bps).unwrap_or(0.0);
                     if micro_diff > self.entry_veto_threshold_bps {
-                        log::info!("RL_OPEN_SHORT_VETO: micro={:.2}bps threshold={:.2}", micro_diff, self.entry_veto_threshold_bps);
                         self.entry_veto_count_in_step += 1;
                         self.entry_veto_count += 1;
-                        return 0;
+                        return (0, true);
                     }
                 }
-                self.submit_passive_order(Side::Sell, target_qty)
+                (self.submit_passive_order(Side::Sell, target_qty), false)
             }
             ActionType::AddShort => {
                 *self.action_counts.entry("ADD_SHORT".to_string()).or_insert(0) += 1;
-                if !has_pos || pos_side != Side::Sell { return 0; }
+                if !has_pos || pos_side != Side::Sell { return (0, true); }
                 if self.use_selective_entry {
                     let micro_diff = self.last_features.as_ref().and_then(|f| f.microprice_minus_mid_bps).unwrap_or(0.0);
                     if micro_diff > self.entry_veto_threshold_bps {
-                        log::info!("RL_ADD_SHORT_VETO: micro={:.2}bps threshold={:.2}", micro_diff, self.entry_veto_threshold_bps);
                         self.entry_veto_count_in_step += 1;
                         self.entry_veto_count += 1;
-                        return 0;
+                        return (0, true);
                     }
                 }
                 let delta = (target_qty - pos_qty).max(0.0);
-                if delta > 0.0 { self.submit_passive_order(Side::Sell, delta) } else { 0 }
+                ((if delta > 0.0 { self.submit_passive_order(Side::Sell, delta) } else { 0 }), false)
             }
             ActionType::ReduceShort => {
                 *self.action_counts.entry("REDUCE_SHORT".to_string()).or_insert(0) += 1;
-                if !has_pos || pos_side != Side::Sell { return 0; }
-                self.attempt_market_exit(Side::Buy, pos_qty * 0.5, self.profit_floor_bps, self.stop_loss_bps)
+                if !has_pos || pos_side != Side::Sell { return (0, true); }
+                (self.attempt_market_exit(Side::Buy, pos_qty * 0.5, self.profit_floor_bps, self.stop_loss_bps), false)
             }
             ActionType::CloseShort => {
                 *self.action_counts.entry("CLOSE_SHORT".to_string()).or_insert(0) += 1;
-                if !has_pos || pos_side != Side::Sell { return 0; }
-                self.attempt_market_exit(Side::Buy, pos_qty, self.profit_floor_bps, self.stop_loss_bps)
+                if !has_pos || pos_side != Side::Sell { return (0, true); }
+                (self.attempt_market_exit(Side::Buy, pos_qty, self.profit_floor_bps, self.stop_loss_bps), false)
             }
 
             ActionType::Reprice => {
                 let cancelled = self.cancel_all_orders();
                 self.cancel_count_in_step += cancelled;
-                // Simple re-post at current target
                 if has_pos {
-                    let side = pos_side;
-                    let _ = self.submit_passive_order(side, target_qty - pos_qty);
+                    let _ = self.submit_passive_order(pos_side, target_qty - pos_qty);
+                    (0, false)
+                } else {
+                    (0, cancelled == 0) // INVALID if no pos AND nothing was cancelled
                 }
-                0
             }
         }
     }
@@ -584,9 +582,12 @@ impl EpisodeHandle {
         }
     }
 
-    fn compute_reward(&mut self, trades_count: u32, realized_pnl_step: f64, is_cancel_all: bool, is_taker_action: bool, active_order_count: u32) -> f64 {
+    fn compute_reward(&mut self, num_trades: u32, realized_pnl_step: f64, is_cancel_all: bool, is_taker_action: bool, active_order_count: u32, is_invalid: bool) -> f64 {
         let equity = self.exec_engine.portfolio.state.equity_usdt;
         let mid = self.last_mid_price;
+
+        let micro_minus_mid = self.last_features.as_ref().and_then(|f| f.microprice_minus_mid_bps).unwrap_or(0.0);
+        let imbalance = self.last_features.as_ref().and_then(|f| f.trade_imbalance_5s).unwrap_or(0.0);
 
         // Construct MakerFillDetail list (needed by both paths)
         let maker_fills: Vec<bot_data::experience::reward::MakerFillDetail> = self.exec_engine.last_fill_events.iter()
@@ -617,6 +618,9 @@ impl EpisodeHandle {
                 active_order_count,
                 realized_pnl_step,
                 is_taker_action,
+                is_invalid,
+                micro_minus_mid,
+                imbalance,
                 &self.reward_config,
             )
         } else {
@@ -661,7 +665,7 @@ impl EpisodeHandle {
                 equity,
                 mid,
                 self.decision_interval_ms,
-                trades_count,
+                num_trades,
                 num_toxic_fills,
                 exposure,
                 tib_count,
@@ -675,6 +679,8 @@ impl EpisodeHandle {
                 is_two_sided,
                 is_taker_action,
                 self.prev_exposure,
+                micro_minus_mid,
+                imbalance,
                 &self.reward_config,
             )
         };
@@ -1013,7 +1019,7 @@ impl RlService for RLServiceImpl {
             cancel_count_in_step: 0,
             reprice_count_in_step: 0,
             post_delta_threshold_bps: cfg.post_delta_threshold_bps, 
-            profit_floor_bps: if cfg.profit_floor_bps > 0.0 { cfg.profit_floor_bps } else { 5.0 },
+            profit_floor_bps: if cfg.profit_floor_bps > 0.0 { cfg.profit_floor_bps } else { 0.5 },
             stop_loss_bps: if cfg.stop_loss_bps > 0.0 { cfg.stop_loss_bps } else { 30.0 },
             prev_realized_pnl: 0.0,
             prev_exposure: 0.0,
@@ -1046,15 +1052,15 @@ impl RlService for RLServiceImpl {
                 reward_two_sided_bonus: if cfg.reward_two_sided_bonus > 0.0 { cfg.reward_two_sided_bonus } else { 0.0 },
                 reward_taker_action_penalty: if cfg.reward_taker_action_penalty > 0.0 { cfg.reward_taker_action_penalty } else { 0.0 },
                 reward_quote_presence_bonus: if cfg.reward_quote_presence_bonus > 0.0 { cfg.reward_quote_presence_bonus } else { 0.0 },
+                invalid_action_penalty: 0.1, // Magnitude of penalty for illegal actions
+                thesis_decay_weight: if cfg.reward_thesis_decay_weight > 0.0 { cfg.reward_thesis_decay_weight } else { 0.0001 },
             },
             decision_interval_ms: decision_interval_ms.try_into().unwrap_or(100),
             // vNext: Hard gate configs
-            use_vnext_reward: cfg.reward_as_penalty_weight > 0.0 || cfg.reward_fee_cost_weight > 0.0,
+            use_vnext_reward: cfg.reward_as_penalty_weight > 0.0 || cfg.reward_fee_cost_weight > 0.0 || cfg.reward_thesis_decay_weight > 0.0,
             close_position_loss_threshold: cfg.close_position_loss_threshold,
             min_post_offset_bps: cfg.min_post_offset_bps,
             imbalance_block_threshold: cfg.imbalance_block_threshold,
-            profit_floor_bps: if cfg.profit_floor_bps > 0.0 { cfg.profit_floor_bps } else { 5.0 },
-            stop_loss_bps: if cfg.stop_loss_bps > 0.0 { cfg.stop_loss_bps } else { 30.0 },
             gate_close_blocked_in_step: 0,
             gate_offset_blocked_in_step: 0,
             gate_imbalance_blocked_in_step: 0,
@@ -1138,7 +1144,7 @@ impl RlService for RLServiceImpl {
 
         let has_pos_before = episode.exec_engine.portfolio.state.positions.get(&episode.symbol).is_some();
 
-        let _ = episode.apply_action(action_type);
+        let (_, is_invalid) = episode.apply_action(action_type);
 
         // 2. Advance to next decision tick
         let (fv_opt, end_of_data) = episode.advance_to_next_tick();
@@ -1217,7 +1223,7 @@ impl RlService for RLServiceImpl {
         };
 
         let active_order_count = episode.exec_engine.portfolio.state.active_orders.len() as u32;
-        let mut reward = episode.compute_reward(trades_this_step, rpnl_step, is_cancel_all, is_taker_action, active_order_count);
+        let mut reward = episode.compute_reward(trades_this_step, rpnl_step, is_cancel_all, is_taker_action, active_order_count, is_invalid);
         if !reward.is_finite() {
             log::error!("Reward is not finite: {}. Clamping to -1.0.", reward);
             reward = -1.0;
@@ -1236,7 +1242,7 @@ impl RlService for RLServiceImpl {
         let toxic_fills = episode.exec_engine.last_fill_events.iter().filter(|e| e.is_toxic).count() as u32;
         let stale_expiries = episode.exec_engine.stale_expiries_in_step;
         let cancel_count = episode.cancel_count_in_step;
-        let active_order_count = episode.exec_engine.portfolio.state.active_orders.len() as u32;
+        let active_order_count_for_info = episode.exec_engine.portfolio.state.active_orders.len() as u32;
 
         let mut fills = Vec::new();
         for event in &episode.exec_engine.last_fill_events {
@@ -1302,6 +1308,8 @@ impl RlService for RLServiceImpl {
                 exit_blocked_avg_pnl_bps: if episode.exit_blocked_count > 0 { episode.exit_blocked_pnl_sum / episode.exit_blocked_count as f64 } else { 0.0 },
                 exit_blocked_1_to_4_count: episode.exit_blocked_1_to_4_count,
                 opportunity_lost_count: episode.opportunity_lost_count,
+                thesis_decay_penalty: episode.reward_state.last_thesis_penalty,
+                is_invalid,
             }),
             state: Some(env_state),
             feature_health: Some(f_health),

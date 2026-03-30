@@ -10,15 +10,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'bot_ml'))
 from grpc_env import GrpcTradingEnv
 
 def teacher_policy(obs, position, holding_s, info=None):
-    # Signals from observation (S2 Schema v6)
+    # Signals from observation (Sprint 2 Schema v6)
     mid = obs[0]
     spread_bps = obs[2]
     ret_1s = obs[4]
     ret_5s = obs[6]
-    buy_v_5s = obs[16]
-    sell_v_5s = obs[17]
-    imb_1s = obs[20]
-    imb_5s = obs[21]
+    # Taker flow (14..23) is often missing in golden_l2; use Book Imbalance (D)
+    imb_1s = obs[24] # obi_top1
+    imb_5s = obs[24] # fallback to top1 for rapid calibration
     microprice = obs[27]
     pnl_pct = obs[49] # latent_pnl_pct
     
@@ -34,44 +33,35 @@ def teacher_policy(obs, position, holding_s, info=None):
     eff_micro = microprice if microprice > 0 else mid
     
     # Global Filters
-    if obs_quality < 0.99 or book_age > 50 or spread_bps >= 3.0:
+    if obs_quality < 0.99 or book_age > 100 or spread_bps >= 10.0:
         if position != 0:
-            return 6 # CLOSE_POSITION (Safe out)
+            return 6 # CLOSE_POSITION
         return 0
     
     if position != 0:
         pnl_bps = pnl_pct * 10000.0
         
-        # EXIT RULES V2
-        if pnl_bps >= 5.0: return 6 # CLOSE_POSITION
-        if pnl_bps <= -3.0: return 6 # CLOSE_POSITION
-        if holding_s >= 12: return 6 # CLOSE_POSITION
-        if holding_s > 8 and abs(pnl_bps) < 1.0: return 6 # CLOSE_POSITION
+        # EXIT RULES
+        if pnl_bps >= 4.0: return 6 
+        if pnl_bps <= -2.5: return 6
+        if holding_s >= 20: return 6 
         
         if position > 0: # Long
-            if imb_1s < -0.05 or ret_1s < 0 or eff_micro < mid:
-                return 6 # CLOSE_POSITION
+            if imb_1s < -0.05 or eff_micro < mid:
+                return 6 
         else: # Short
-            if imb_1s > 0.05 or ret_1s > 0 or eff_micro > mid:
-                return 6 # CLOSE_POSITION
+            if imb_1s > 0.05 or eff_micro > mid:
+                return 6 
     else:
-        # ENTRY RULES V2
-        flow_ratio = buy_v_5s / max(sell_v_5s, eps)
+        # ENTRY RULES (Book Imbalance only for BTCUSDT)
         
         # LONG ENTRY
-        if (imb_5s > 0.18 and 
-            flow_ratio > 1.35 and 
-            ret_1s > 0 and 
-            ret_5s > 0 and 
+        if (imb_5s > 0.08 and 
             eff_micro >= mid):
             return 1 # POST_BID
             
         # SHORT ENTRY
-        flow_ratio_s = sell_v_5s / max(buy_v_5s, eps)
-        if (imb_5s < -0.18 and 
-            flow_ratio_s > 1.35 and 
-            ret_1s < 0 and 
-            ret_5s < 0 and 
+        if (imb_5s < -0.08 and 
             eff_micro <= mid):
             return 2 # POST_ASK
             

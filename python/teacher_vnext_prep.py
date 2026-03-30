@@ -23,9 +23,10 @@ def main():
         server_addr=args.server,
         dataset_id=args.dataset_id,
         symbol="BTCUSDT",
-        fill_model=0, # Conservative (Stability over density)
-        maker_fee=2.0,
-        taker_fee=5.0,
+        fill_model=2, # Optimistic for expert generation
+        initial_equity=10000.0,
+        max_pos_frac=0.20,
+        decision_interval_ms=1000,
         slip_bps=1.0,
         random_start_offset=True
     )

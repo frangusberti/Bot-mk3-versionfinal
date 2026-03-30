@@ -559,6 +559,8 @@ message RLConfig {
     bool use_selective_entry = 48;
     double entry_veto_threshold_bps = 49;
     double reward_realized_pnl_bonus_weight = 50;
+    double reward_thesis_decay_weight = 51;
+    bool micro_strict = 52;
 }
 
 message Observation {
@@ -622,6 +624,8 @@ message StepInfo {
     double exit_blocked_avg_pnl_bps = 23;
     uint32 exit_blocked_1_to_4_count = 24;
     uint32 opportunity_lost_count = 25;
+    double thesis_decay_penalty = 26;
+    bool is_invalid = 27;
 }
 
 message TradeFill {

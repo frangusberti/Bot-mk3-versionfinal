@@ -83,7 +83,9 @@ impl ExperienceBuilder {
             self.prev_action == 5, // CANCEL_ALL check
             false, // is_two_sided not tracked here
             false, // is_taker_action not tracked here
-            0.0,   // prev_exposure not tracked here
+            self.prev_pos_qty * current_mid, // prev_exposure
+            0.0, // micro_minus_mid fallthrough
+            0.0, // imbalance fallthrough
             &self.reward_config
         );
         

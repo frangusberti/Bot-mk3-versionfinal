@@ -12,6 +12,7 @@ pub struct RewardState {
     pub peak_equity: f64,
     pub initial_equity: f64,
     pub pending_mtm: Vec<PendingMtm>,
+    pub last_thesis_penalty: f64,
 }
 
 impl RewardState {
@@ -21,6 +22,7 @@ impl RewardState {
             peak_equity: initial_equity,
             initial_equity,
             pending_mtm: Vec::new(),
+            last_thesis_penalty: 0.0,
         }
     }
 }
@@ -39,6 +41,10 @@ pub struct RewardConfig {
     pub inventory_risk_weight: f64,
     /// Weight for rewarding realized profit via REDUCE/CLOSE actions (surgical intervention)
     pub realized_pnl_bonus_weight: f64,
+    /// Penalty for choosing an action that is illegal for the current state (e.g. ADD while FLAT)
+    pub invalid_action_penalty: f64,
+    /// Weight for thesis decay penalty (microprice drift against position)
+    pub thesis_decay_weight: f64,
 
     // ── Legacy fields (kept at 0.0 for backward compat, not used by vNext) ──
     pub overtrading_penalty: f64,
@@ -71,6 +77,8 @@ impl Default for RewardConfig {
             as_horizon_ms: 3000,
             inventory_risk_weight: 0.0005,
             realized_pnl_bonus_weight: 2.0,
+            invalid_action_penalty: 0.1, // Fixed -0.1 penalty per bad action
+            thesis_decay_weight: 0.0,    // Default to off
 
             // Legacy — all zeroed
             overtrading_penalty: 0.0,
@@ -121,6 +129,9 @@ impl RewardCalculator {
         active_order_count: u32,
         realized_pnl_step: f64,
         is_taker_action: bool,
+        is_invalid_action: bool,
+        micro_minus_mid_bps: f64,
+        trade_imbalance_5s: f64,
         config: &RewardConfig,
     ) -> f64 {
         // Validation
@@ -181,7 +192,7 @@ impl RewardCalculator {
 
         // ── Term 5: Exploration Bonus (Micro-Proxy) ──
         let exploration_bonus = if config.reward_quote_presence_bonus > 0.0 {
-            config.reward_quote_presence_bonus * (active_order_count as f64)
+            config.reward_quote_presence_bonus * (active_order_count.min(2) as f64)
         } else {
             0.0
         };
@@ -194,19 +205,37 @@ impl RewardCalculator {
             0.0
         };
 
+        let invalid_penalty = if is_invalid_action { config.invalid_action_penalty } else { 0.0 };
+
+        // ── Term 8: Thesis Decay Penalty (Soft Shaping) ──
+        // Penalize the agent if microprice indicates pressure AGAINST our position.
+        // micro_minus_mid_bps is (Micro - Mid) / Mid * 10000.
+        // If LONG (side=1) and micro < mid (negative diff), we are in "decay".
+        let side = if exposure > 0.0 { 1.0 } else if exposure < 0.0 { -1.0 } else { 0.0 };
+        let thesis_decay = if side != 0.0 {
+            let decay_bps = (side * micro_minus_mid_bps).min(0.0).abs();
+            decay_bps * (1.0 + trade_imbalance_5s.abs())
+        } else {
+            0.0
+        };
+        let thesis_penalty = config.thesis_decay_weight * thesis_decay;
+        state.last_thesis_penalty = thesis_penalty;
+
         // ── Update state ──
         if current_equity > state.peak_equity {
             state.peak_equity = current_equity;
         }
         state.prev_equity = current_equity;
 
-        // ── Combine: 6 terms (4 economic + 1 exploration + 1 surgical exit) ──
+        // ── Combine: 7 terms (4 economic + 1 exploration + 1 surgical exit + 1 invalid penalty) ──
         let reward = log_return
             - fee_penalty
             + as_signal      // as_signal is already negative for adverse
             - inventory_penalty
             + exploration_bonus
-            + realized_bonus;
+            + realized_bonus
+            - invalid_penalty
+            - thesis_penalty;
 
         if !reward.is_finite() {
             return -1.0;
@@ -237,6 +266,8 @@ impl RewardCalculator {
         is_two_sided: bool,
         is_taker_action: bool,
         prev_exposure: f64,
+        micro_minus_mid_bps: f64,
+        trade_imbalance_5s: f64,
         config: &RewardConfig,
     ) -> f64 {
         // Validation
@@ -326,6 +357,19 @@ impl RewardCalculator {
             + two_sided_bonus
             - take_action_penalty
             + quote_presence_bonus;
+
+        // --- Term 19: Thesis Decay (Integrated into Legacy) ---
+        let side = if exposure > 0.0 { 1.0 } else if exposure < 0.0 { -1.0 } else { 0.0 };
+        let thesis_decay = if side != 0.0 {
+            let decay_bps = (side * micro_minus_mid_bps).min(0.0).abs();
+            decay_bps * (1.0 + trade_imbalance_5s.abs())
+        } else {
+            0.0
+        };
+        let thesis_penalty = config.thesis_decay_weight * thesis_decay;
+        state.last_thesis_penalty = thesis_penalty;
+        
+        let reward = reward - thesis_penalty;
 
         if !reward.is_finite() {
             return -1.0;

@@ -23,7 +23,7 @@ def get_memory_usage():
     process = psutil.Process(os.getpid())
     return process.memory_info().rss / 1024 / 1024 # MB
 
-def run_ppo_audit(model_path, venv_path, dataset_id, steps_per_eval=5000, server="127.0.0.1:50051", is_lite=True, **env_kwargs):
+def run_ppo_audit(model_path, venv_path, dataset_id, steps_per_eval=5000, server="127.0.0.1:50051", is_lite=True, random_start_offset=False, **env_kwargs):
     """Standalone audit for a specific checkpoint."""
     rss_start = get_memory_usage()
     print(f"[MEMORY] Audit Start RSS: {rss_start:.1f} MB")
@@ -93,6 +93,11 @@ def run_ppo_audit(model_path, venv_path, dataset_id, steps_per_eval=5000, server
     prev_exit_blocked = 0
     prev_exit_blocked_1_to_4 = 0
     prev_opportunity_lost = 0
+    total_thesis_decay = 0.0
+    total_invalid_actions = 0
+    close_with_pos = 0
+    close_flat = 0
+    exit_coincident_with_decay = 0
     
     for _ in range(steps_per_eval):
         with torch.no_grad():
@@ -108,6 +113,23 @@ def run_ppo_audit(model_path, venv_path, dataset_id, steps_per_eval=5000, server
         info0 = info[0]
         curr_mid = info0.get("mid_price", 0.0)
         curr_ts = info0.get("ts", 0)
+        
+        # Invalid Action Tracking
+        if info0.get("is_invalid", False):
+            total_invalid_actions += 1
+            
+        # Analysis of CLOSE intent
+        is_close_intent = (action in [4, 8]) # CLOSE_LONG or CLOSE_SHORT
+        pos_qty = prev_obs[0, 48] # Inventory pos_frac
+        has_pos = abs(pos_qty) > 0.005
+        
+        if is_close_intent:
+            if has_pos:
+                close_with_pos += 1
+                if info0.get("thesis_decay_penalty", 0.0) > 0:
+                    exit_coincident_with_decay += 1
+            else:
+                close_flat += 1
         
         # Aggregate Phase 4 Telemetry
         step_actions = info0.get("action_counts", {})
@@ -203,6 +225,7 @@ def run_ppo_audit(model_path, venv_path, dataset_id, steps_per_eval=5000, server
         total_gate_offset_blocked += info0.get("gate_offset_blocked", 0)
         total_gate_imbalance_blocked += info0.get("gate_imbalance_blocked", 0)
         total_fees_paid += info0.get("fees_paid", 0.0)
+        total_thesis_decay += info0.get("thesis_decay_penalty", 0.0)
         
         for fill in info0.get("fills", []):
             side, price, qty = fill["side"], fill["price"], fill["qty"]
@@ -211,6 +234,7 @@ def run_ppo_audit(model_path, venv_path, dataset_id, steps_per_eval=5000, server
             capture_bps = (curr_mid - price) * side_sign / curr_mid * 10000 if curr_mid > 0 else 0
             spread_captures_bps.append(capture_bps)
             paper.apply_fill(side, price, qty, fill.get("liquidity") == "Maker")
+            print(f"  [AUDIT_TRADE] {side} {qty} @ {price}")
             
             mtm_entry = {
                 "ts": curr_ts, "side": -side_sign, "ref_mid": curr_mid,
@@ -280,8 +304,15 @@ def run_ppo_audit(model_path, venv_path, dataset_id, steps_per_eval=5000, server
             "exit_distribution": dict(final_exit_distribution),
             "total_realized_pnl": float(total_realized_pnl),
             "avg_win_hold_ms": float(avg_win_hold_ms),
+            "total_thesis_decay": float(total_thesis_decay),
+            "total_invalid_actions": int(total_invalid_actions),
+            "invalid_action_rate": float(total_invalid_actions / steps_per_eval * 100),
+            "close_with_pos": int(close_with_pos),
+            "close_flat": int(close_flat),
+            "exit_coincident_with_decay": int(exit_coincident_with_decay),
             "avg_loss_hold_ms": float(avg_loss_hold_ms),
             "avg_pnl_per_trade": float(total_realized_pnl / trades_count) if trades_count > 0 else 0.0,
+            "thesis_decay_total": float(total_thesis_decay),
             "exit_blocked": {
                 "count": int(total_exit_blocked),
                 "avg_pnl": float(sum_exit_blocked_pnl / total_exit_blocked) if total_exit_blocked > 0 else 0.0,
@@ -327,9 +358,12 @@ if __name__ == "__main__":
     parser.add_argument("--server", type=str, default="127.0.0.1:50051")
     parser.add_argument("--fill_model", type=int, default=2)
     parser.add_argument("--profit_floor_bps", type=float, default=2.0)
+    parser.add_argument("--reward_thesis_decay_weight", type=float, default=0.0001)
+    parser.add_argument("--micro_strict", type=str, default="True")
     args = parser.parse_args()
     
     use_selective = args.use_selective_entry.lower() == "true"
+    micro_strict = args.micro_strict.lower() == "true"
     
     res = run_ppo_audit(
         model_path=args.model,
@@ -340,6 +374,8 @@ if __name__ == "__main__":
         use_selective_entry=use_selective,
         entry_veto_threshold_bps=args.entry_veto_threshold_bps,
         fill_model=args.fill_model,
-        profit_floor_bps=args.profit_floor_bps
+        profit_floor_bps=args.profit_floor_bps,
+        reward_thesis_decay_weight=args.reward_thesis_decay_weight,
+        micro_strict=micro_strict
     )
     print(json.dumps(res, indent=2))
