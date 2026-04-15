@@ -72,7 +72,16 @@ class GrpcTradingEnv(gym.Env):
         use_selective_entry: bool = False,
         entry_veto_threshold_bps: float = 1.0,
         reward_thesis_decay_weight: float = 0.0,
+        reward_trailing_mfe_penalty_weight: float = 0.0,
+        use_winner_unlock: bool = False,
+        reward_consolidated_variant: bool = False,
         micro_strict: bool = True,
+        use_selective_entry_long_v2: bool = False,
+        long_veto_imbalance_threshold: float = 0.0,
+        long_veto_bb_pos_5m_threshold: float = 0.0,
+        long_veto_regime_dead_threshold: float = 0.0,
+        reward_exit_taker_penalty_weight: float = 0.0,
+        reward_exit_maker_bonus_weight: float = 0.0,
         **kwargs
     ):
         super().__init__()
@@ -95,7 +104,7 @@ class GrpcTradingEnv(gym.Env):
             self.feature_signature = info_resp.feature_signature
             self.feature_profile = info_resp.feature_profile
         except grpc.RpcError:
-            obs_dim = 148  # FeatureRow::OBS_DIM
+            obs_dim = 166  # FeatureRow::OBS_DIM (Schema v7)
             action_dim = 10
             self.feature_signature = "unknown"
             self.feature_profile = "unknown"
@@ -152,10 +161,33 @@ class GrpcTradingEnv(gym.Env):
             profit_floor_bps=profit_floor_bps,
             stop_loss_bps=stop_loss_bps,
             reward_thesis_decay_weight=reward_thesis_decay_weight,
+            reward_trailing_mfe_penalty_weight=reward_trailing_mfe_penalty_weight,
+            use_winner_unlock=use_winner_unlock,
+            reward_consolidated_variant=reward_consolidated_variant,
             micro_strict=kwargs.get("micro_strict", True),
+            use_selective_entry_long_v2=use_selective_entry_long_v2,
+            long_veto_imbalance_threshold=long_veto_imbalance_threshold,
+            long_veto_bb_pos_5m_threshold=long_veto_bb_pos_5m_threshold,
+            long_veto_regime_dead_threshold=long_veto_regime_dead_threshold,
+            reward_exit_taker_penalty_weight=reward_exit_taker_penalty_weight,
+            reward_exit_maker_bonus_weight=reward_exit_maker_bonus_weight,
+            use_exit_curriculum_d1=kwargs.get("use_exit_curriculum_d1", False),
+            maker_first_exit_timeout_ms=kwargs.get("maker_first_exit_timeout_ms", 30000),
+            exit_fallback_loss_bps=kwargs.get("exit_fallback_loss_bps", 10.0),
+            exit_fallback_mfe_giveback_bps=kwargs.get("exit_fallback_mfe_giveback_bps", 5.0),
+            exit_fallback_thesis_decay_threshold=kwargs.get("exit_fallback_thesis_decay_threshold", 0.45),
+            exit_maker_pricing_multiplier=kwargs.get("exit_maker_pricing_multiplier", 1.0),
         )
 
+        self.entry_veto_threshold_bps = kwargs.get("entry_veto_threshold_bps", 0.2)
+        self.reward_realized_pnl_bonus_weight = kwargs.get("reward_realized_pnl_bonus_weight", 0.0)
+        self.reward_thesis_decay_weight = kwargs.get("reward_thesis_decay_weight", 0.0001)
+        self.micro_strict = kwargs.get("micro_strict", False)
+        self.reward_consolidated_variant = kwargs.get("reward_consolidated_variant", False)
+
         self.episode_id = None
+        # Action masking: flat state default (HOLD + OPEN_LONG + OPEN_SHORT valid)
+        self._action_mask = np.array([1,1,0,0,0,1,0,0,0,0], dtype=np.float32)
 
     def reset(self, *, seed=None, options=None):
         """Reset the environment and return initial observation."""
@@ -179,6 +211,10 @@ class GrpcTradingEnv(gym.Env):
             "episode_id": resp.episode_id,
             "equity": resp.state.equity if resp.state else 0.0,
             "ts": resp.obs.ts,
+            "position_qty": resp.state.position_qty if resp.state else 0.0,
+            "entry_price": resp.state.entry_price if resp.state else 0.0,
+            "realized_pnl": resp.state.realized_pnl if resp.state else 0.0,
+            "fees_paid": resp.state.fees_paid if resp.state else 0.0,
         }
         if resp.info:
             info["thesis_decay_penalty"] = getattr(resp.info, "thesis_decay_penalty", 0.0)
@@ -189,15 +225,17 @@ class GrpcTradingEnv(gym.Env):
                 "obs_quality": resp.feature_health.obs_quality,
                 "book_age_ms": resp.feature_health.book_age_ms,
             }
+        # Update action mask from reset response (or use flat-state default)
+        if resp.info and len(resp.info.action_mask) == self.action_space.n:
+            self._action_mask = np.array(list(resp.info.action_mask), dtype=np.float32)
+        else:
+            self._action_mask = np.array([1,1,0,0,0,1,0,0,0,0], dtype=np.float32)
         return obs, info
 
     def step(self, action: int):
         """Execute one step in the environment."""
-        action_msg = bot_pb2.Action(type=action)
-        req = bot_pb2.StepRequest(
-            episode_id=self.episode_id,
-            action=action_msg,
-        )
+        req = bot_pb2.StepRequest(episode_id=self.episode_id)
+        req.action.type = action
 
         resp = self.stub.Step(req)
 
@@ -230,6 +268,36 @@ class GrpcTradingEnv(gym.Env):
             info["opportunity_lost_count"] = getattr(resp.info, "opportunity_lost_count", 0)
             info["thesis_decay_penalty"] = getattr(resp.info, "thesis_decay_penalty", 0.0)
             info["is_invalid"] = getattr(resp.info, "is_invalid", False)
+            info["soft_veto_count"] = getattr(resp.info, "soft_veto_count_in_step", 0)
+            info["veto_long_flow_count"] = getattr(resp.info, "veto_long_flow_count", 0)
+            info["veto_long_bb_count"] = getattr(resp.info, "veto_long_bb_count", 0)
+            info["veto_long_dead_regime_count"] = getattr(resp.info, "veto_long_dead_regime_count", 0)
+            info["hard_invalid_count"] = getattr(resp.info, "hard_invalid_count_in_step", 0)
+            info["accepted_as_marketable_count"] = getattr(resp.info, "accepted_as_marketable_count", 0)
+            info["accepted_as_passive_count"] = getattr(resp.info, "accepted_as_passive_count", 0)
+            info["resting_fill_count"] = getattr(resp.info, "resting_fill_count", 0)
+            info["exit_maker_fills"] = getattr(resp.info, "exit_maker_fills", 0)
+            info["voluntary_exit_taker_fills"] = getattr(resp.info, "voluntary_exit_taker_fills", 0)
+            info["action_counts"] = dict(resp.info.action_counts)
+        if resp.state:
+            info["position_qty"] = resp.state.position_qty
+            info["entry_price"] = resp.state.entry_price
+            info["unrealized_pnl"] = resp.state.unrealized_pnl
+            info["realized_pnl"] = resp.state.realized_pnl
+            info["fees_paid"] = resp.state.fees_paid
+            info["equity"] = resp.state.equity
+            info["immediate_fill_count"] = getattr(resp.info, "immediate_fill_count", 0)
+            info["liquidity_flag_unknown_count"] = getattr(resp.info, "liquidity_flag_unknown_count", 0)
+            
+            # Action Masking & Granular Breakdown
+            raw_mask = list(getattr(resp.info, "action_mask", [1.0]*10))
+            info["action_mask"] = raw_mask
+            self._action_mask = np.array(raw_mask, dtype=np.float32)
+            info["invalid_open_marketable"] = getattr(resp.info, "invalid_open_marketable_count", 0)
+            info["invalid_close_flat"] = getattr(resp.info, "invalid_close_flat_count", 0)
+            info["invalid_reprice_empty"] = getattr(resp.info, "invalid_reprice_empty_count", 0)
+            info["invalid_pos_side_mismatch"] = getattr(resp.info, "invalid_pos_side_mismatch_count", 0)
+            info["masked_action_count"] = getattr(resp.info, "masked_action_chosen_count", 0)
             
             # Phase 4 Lifecycle Telemetry
             info["action_counts"] = dict(resp.info.action_counts) if hasattr(resp.info, "action_counts") else {}
@@ -237,6 +305,12 @@ class GrpcTradingEnv(gym.Env):
             info["avg_win_hold_ms"] = getattr(resp.info, "avg_win_hold_ms", 0.0)
             info["avg_loss_hold_ms"] = getattr(resp.info, "avg_loss_hold_ms", 0.0)
             info["exit_distribution"] = dict(resp.info.exit_distribution) if hasattr(resp.info, "exit_distribution") else {}
+            
+            # D1 Telemetry
+            info["exit_intent_active"] = getattr(resp.info, "exit_intent_active", 0)
+            info["exit_fallback_triggered"] = getattr(resp.info, "exit_fallback_triggered", 0)
+            info["time_since_exit_intent_ms"] = getattr(resp.info, "time_since_exit_intent_ms", 0)
+            info["exit_fallback_reason"] = getattr(resp.info, "exit_fallback_reason", 0)
             
             fills_list = []
             for f in getattr(resp.info, "fills", []):
@@ -261,6 +335,10 @@ class GrpcTradingEnv(gym.Env):
             info["fees_paid"] = resp.state.fees_paid
 
         return obs, reward, terminated, truncated, info
+
+    def action_masks(self) -> np.ndarray:
+        """Return boolean mask of valid actions for MaskablePPO."""
+        return self._action_mask > 0.5
 
     def close(self):
         """Clean up gRPC channel and end episode on server."""

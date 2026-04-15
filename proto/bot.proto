@@ -490,6 +490,10 @@ message FeatureHealth {
     int64 funding_age_ms = 4;
     int64 oi_age_ms = 5;
     float obs_quality = 6;
+    uint32 h1m_candles = 7;
+    uint32 h5m_candles = 8;
+    uint32 h15m_candles = 9;
+    uint32 mid_history_len = 10;
 }
 
 enum MakerFillModel {
@@ -561,6 +565,23 @@ message RLConfig {
     double reward_realized_pnl_bonus_weight = 50;
     double reward_thesis_decay_weight = 51;
     bool micro_strict = 52;
+    bool reward_consolidated_variant = 53;
+    double reward_trailing_mfe_penalty_weight = 54;
+    bool use_winner_unlock = 55;
+    bool use_selective_entry_long_v2 = 56;
+    double long_veto_imbalance_threshold = 57;
+    double long_veto_bb_pos_5m_threshold = 58;
+    double long_veto_regime_dead_threshold = 59;
+    double reward_exit_taker_penalty_weight = 60;
+    double reward_exit_maker_bonus_weight = 61;
+
+    // D1: Maker-First Exit Curriculum
+    bool use_exit_curriculum_d1 = 62;
+    uint32 maker_first_exit_timeout_ms = 63;
+    double exit_fallback_loss_bps = 64;
+    double exit_fallback_mfe_giveback_bps = 65;
+    double exit_fallback_thesis_decay_threshold = 66;
+    float exit_maker_pricing_multiplier = 67;
 }
 
 message Observation {
@@ -626,6 +647,28 @@ message StepInfo {
     uint32 opportunity_lost_count = 25;
     double thesis_decay_penalty = 26;
     bool is_invalid = 27;
+    uint32 soft_veto_count_in_step = 28;
+    uint32 hard_invalid_count_in_step = 29;
+    uint32 exit_maker_fills = 30;
+    uint32 voluntary_exit_taker_fills = 31;
+    uint32 accepted_as_marketable_count = 32;
+    uint32 accepted_as_passive_count = 33;
+    uint32 resting_fill_count = 34;
+    uint32 immediate_fill_count = 35;
+    uint32 liquidity_flag_unknown_count = 36;
+    repeated float action_mask = 37;
+    uint32 invalid_open_marketable_count = 38;
+    uint32 invalid_close_flat_count = 39;
+    uint32 invalid_reprice_empty_count = 40;
+    uint32 invalid_pos_side_mismatch_count = 41;
+    uint32 masked_action_chosen_count = 42;
+    uint32 veto_long_flow_count = 43;
+    uint32 veto_long_bb_count = 44;
+    uint32 veto_long_dead_regime_count = 45;
+    uint32 exit_intent_active = 46;
+    uint32 exit_fallback_triggered = 47;
+    uint32 time_since_exit_intent_ms = 48;
+    uint32 exit_fallback_reason = 49;
 }
 
 message TradeFill {

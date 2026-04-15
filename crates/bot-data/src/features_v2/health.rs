@@ -29,7 +29,7 @@ pub struct FeatureHealthReport {
     pub health_state: String, // "NORMAL", "DEGRADED"
 }
 
-const NUM_FEATURES: usize = 74;
+const NUM_FEATURES: usize = 83;
 
 #[derive(Clone)]
 struct FeatureSample {
@@ -159,7 +159,7 @@ impl FeatureHealthAggregator {
 
         // Simple quality heuristic: average of non-mask0 rate for critical features
         // mid_price(0), spread_bps(2), obi_top1(14), microprice(16)
-        let critical_indices = [0, 2, 14, 16];
+        let critical_indices = [0, 2, 27, 30];
         let mut crit_sum = 0.0;
         for &idx in &critical_indices {
             crit_sum += 1.0 - m0_rates[idx];

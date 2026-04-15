@@ -1,6 +1,6 @@
 //! # Feature Engine V2
 //!
-//! Modular, deterministic, no-lookahead feature engine producing 74-feature
+//! Modular, deterministic, no-lookahead feature engine producing 83-feature
 //! `FeatureRow` vectors at fixed 1-second intervals.
 //!
 //! ## Architecture
@@ -84,7 +84,7 @@ impl Default for FeatureEngineV2Config {
     }
 }
 
-/// Feature Engine V2 — Produces 74-feature FeatureRows every Δt seconds.
+/// Feature Engine V2 — Produces 83-feature FeatureRows every Δt seconds.
 ///
 /// ## Contract
 /// - `update(ev)`: Feed incoming market events. Only events with timestamp <= t_emit
@@ -130,11 +130,13 @@ pub struct FeatureEngineV2 {
     current_best_bid: f64,
     current_best_ask: f64,
     pending_queue: std::collections::VecDeque<PendingEvent>,
+    
+    /// Keep track of last timestamp we advanced technical/price buffers.
+    last_state_advance_ts: i64,
 }
 
 impl FeatureEngineV2 {
     pub fn new(config: FeatureEngineV2Config) -> Self {
-        let slow_tf = config.slow_tf.clone();
         let persistence_window = config.persistence_window;
         let symbol = config.symbol.clone();
         let telemetry_window_ms = config.telemetry_window_ms;
@@ -145,7 +147,7 @@ impl FeatureEngineV2 {
             flow: compute_flow::FlowState::new(),
             micro: compute_micro::MicroState::new(),
             shocks: compute_shocks::ShockState::new(),
-            tech: compute_tech::TechState::new(&slow_tf),
+            tech: compute_tech::TechState::new(),
             account: compute_account::AccountState::default(),
             oi: compute_oi::OIState::new(),
             absorption: compute_absorption::AbsorptionState::new(),
@@ -157,6 +159,7 @@ impl FeatureEngineV2 {
             current_best_bid: 0.0,
             current_best_ask: 0.0,
             pending_queue: VecDeque::new(),
+            last_state_advance_ts: 0,
         }
     }
 
@@ -166,7 +169,8 @@ impl FeatureEngineV2 {
         let ts = ev.time_canonical;
 
         if self.next_emit_ts == 0 {
-            self.next_emit_ts = ts + self.config.interval_ms;
+            // Floor-align the first emit timestamp to the interval for deterministic boundaries
+            self.next_emit_ts = (ts / self.config.interval_ms) * self.config.interval_ms + self.config.interval_ms;
             info!("FeatureEngineV2 initialized: first_ts={}, next_emit_ts={}, interval={}", 
                 ts, self.next_emit_ts, self.config.interval_ms);
         }
@@ -185,6 +189,8 @@ impl FeatureEngineV2 {
                 });
             }
         }
+
+        // ── Internal Heartbeat removed from here to prevent maybe_emit starvation ──
     }
 
     fn apply_event(&mut self, ev: &NormalizedMarketEvent) {
@@ -193,11 +199,11 @@ impl FeatureEngineV2 {
         let event_type = ev.event_type.as_str();
 
         // ─── AggTrade / Trade ───
-        if stream.contains("aggTrade") || stream.contains("trade") || event_type == "trade" {
-            if let (Some(_price), Some(qty)) = (ev.price, ev.qty) {
+        if stream.contains("aggTrade") || stream.contains("trade") || event_type == "trade" || event_type == "aggTrade" {
+            if let (Some(price), Some(qty)) = (ev.price, ev.qty) {
                 let is_taker_buy = match ev.side.as_deref() {
-                    Some("Buy") | Some("buy") => true,
-                    Some("Sell") | Some("sell") => false,
+                    Some("Buy") | Some("buy") | Some("BUY") => true,
+                    Some("Sell") | Some("sell") | Some("SELL") => false,
                     _ => {
                         !(ev.payload_json.contains("\"m\":true") || ev.payload_json.contains("\"m\": true"))
                     }
@@ -208,14 +214,20 @@ impl FeatureEngineV2 {
             }
         }
 
-        // ─── BookTicker (BBO) ───
-        if stream.contains("bookTicker") || event_type == "bookTicker" {
-            if let (Some(bid), Some(ask)) = (ev.best_bid, ev.best_ask) {
+        // ─── Always sync BBO if present (Robust Sink) ───
+        if let (Some(bid), Some(ask)) = (ev.best_bid, ev.best_ask) {
+            if bid > 0.0 && ask > 0.0 {
                 self.current_best_bid = bid;
                 self.current_best_ask = ask;
                 self.warmup.has_bbo = true;
-                self.health.last_book_ts = ts;
+                if stream.contains("bookTicker") || event_type == "bookTicker" {
+                    self.health.last_book_ts = ts;
+                }
             }
+        }
+
+        // ─── BookTicker (OrderBook Seeding) ───
+        if stream.contains("bookTicker") || event_type == "bookTicker" {
             #[derive(serde::Deserialize)]
             struct BinanceTicker {
                 #[serde(alias = "u")]
@@ -230,7 +242,6 @@ impl FeatureEngineV2 {
                     if let (Ok(bq), Ok(aq)) = (bq_str.parse::<f64>(), aq_str.parse::<f64>()) {
                         if let (Some(bid), Some(ask)) = (ev.best_bid, ev.best_ask) {
                             // Seed the orderbook with BBO if it's the only data we have (L1 fallback)
-                            // Only do this if we don't have a more complete book already.
                             if self.ob.status == OrderBookStatus::Desynced || self.ob.status == OrderBookStatus::WaitingForSnapshot {
                                 let update_id = ticker.update_id.unwrap_or(1);
                                 if update_id >= 0 {
@@ -306,7 +317,7 @@ impl FeatureEngineV2 {
         }
 
         // ─── Liquidation ───
-        if stream.contains("forceOrder") || event_type == "liquidation" {
+        if stream.contains("forceOrder") || event_type == "liquidation" || event_type == "forceOrder" {
             if let (Some(price), Some(qty)) = (ev.liquidation_price.or(ev.price), ev.liquidation_qty.or(ev.qty)) {
                 let is_buy = matches!(ev.side.as_deref(), Some("Buy") | Some("buy"));
                 self.shocks.record_liquidation(ts, qty * price, is_buy);
@@ -315,8 +326,10 @@ impl FeatureEngineV2 {
 
         // ─── Open Interest ───
         if stream.contains("openInterest") || event_type == "openInterest" {
-            if let Some(oi) = ev.open_interest {
+            // In normalized parquet, OI is often in the qty field
+            if let Some(oi) = ev.open_interest.or(ev.qty) {
                 self.oi.update(ts, oi);
+                self.warmup.has_oi = true;
                 self.health.last_oi_ts = ts;
             }
         }
@@ -345,6 +358,42 @@ impl FeatureEngineV2 {
             self.ob.mark_desynced();
         }
         self.warmup.orderbook_in_sync = in_sync;
+    }
+
+    /// Advances historical states (RSI, Bollinger, Slopes) to a specific timestamp.
+    /// This is called automatically by update() and maybe_emit().
+    fn internal_advance(&mut self, t_emit: i64) {
+        if t_emit <= self.last_state_advance_ts {
+            return;
+        }
+
+        let mid = (self.current_best_bid + self.current_best_ask) / 2.0;
+        if mid > 0.0 {
+            let spread_abs = self.current_best_ask - self.current_best_bid;
+            let spread_bps = spread_abs / mid * 10_000.0;
+
+            // 1. Update Technical Indicators (RSI, BB)
+            self.tech.update(t_emit, mid);
+
+            // 2. Update Price State (History, Ewma)
+            self.price.update_state(mid, spread_bps);
+        }
+
+        self.last_state_advance_ts = t_emit;
+
+        // Progress logging (every 1 hour of simulation time at 1s heartbeat)
+        if self.last_state_advance_ts % 3_600_000 == 0 {
+             info!("FeatureEngine Heartbeat: ts={}, mid={:.2}, candles={}", 
+                t_emit, mid, self.tech.h1m.candle_count());
+        }
+
+        // Sync telemetry state with current buffers
+        if self.config.telemetry_enabled {
+            self.warmup.h1m_candles = self.tech.h1m.candle_count();
+            self.warmup.h5m_candles = self.tech.h5m.candle_count();
+            self.warmup.h15m_candles = self.tech.h15m.candle_count();
+            self.warmup.mid_history_len = self.price.mid_count();
+        }
     }
 
     /// Update account state (position, PnL, drawdown) for Group G features.
@@ -402,13 +451,15 @@ impl FeatureEngineV2 {
         let top_bids = self.ob.top_bids(10);
         let top_asks = self.ob.top_asks(10);
 
+        // ── Advance State for this emit window ──
+        self.internal_advance(t_emit);
+
         // ── Compute all feature groups ──
         let pf = self.price.compute(self.current_best_bid, self.current_best_ask);
         let ff = self.flow.compute(t_emit, self.config.tape_zscore_clamp);
         let strict_in_sync = !self.config.micro_strict || self.ob.is_sync();
         let mf = self.micro.compute(&top_bids, &top_asks, pf.mid_price, strict_in_sync);
         let sf = self.shocks.compute(t_emit, pf.mid_price);
-        self.tech.update(t_emit, pf.mid_price);
         let tf = self.tech.compute(pf.mid_price);
         let tmf = compute_time::compute_time_features(t_emit);
         let af = self.account.to_features();
@@ -471,6 +522,9 @@ impl FeatureEngineV2 {
             rv_5m: pf.rv_5m,
             slope_mid_5s: pf.slope_mid_5s,
             slope_mid_15s: pf.slope_mid_15s,
+            slope_mid_60s: pf.slope_mid_60s,
+            slope_mid_5m: pf.slope_mid_5m,
+            slope_mid_15m: pf.slope_mid_15m,
 
             // C) Taker Flow
             taker_buy_vol_1s: Some(ff.taker_buy_vol_1s),
@@ -510,9 +564,15 @@ impl FeatureEngineV2 {
 
             // F) Technicals
             ema200_distance_pct: tf.ema200_distance_pct,
-            rsi_14: tf.rsi_14,
-            bb_width: tf.bb_width,
-            bb_pos: tf.bb_pos,
+            rsi_1m: tf.rsi_1m,
+            bb_width_1m: tf.bb_width_1m,
+            bb_pos_1m: tf.bb_pos_1m,
+            rsi_5m: tf.rsi_5m,
+            bb_width_5m: tf.bb_width_5m,
+            bb_pos_5m: tf.bb_pos_5m,
+            rsi_15m: tf.rsi_15m,
+            bb_width_15m: tf.bb_width_15m,
+            bb_pos_15m: tf.bb_pos_15m,
 
             // G) Account State
             position_flag: Some(af.position_flag),
@@ -555,18 +615,34 @@ impl FeatureEngineV2 {
 
         if self.config.telemetry_enabled {
             let (obs, clamped) = row.to_obs_vec();
-            let n = FeatureRow::OBS_DIM / 2; // 74
+            let n = FeatureRow::OBS_DIM / 2;
             let values = obs[0..n].to_vec();
             let masks = obs[n..FeatureRow::OBS_DIM].to_vec();
+            
+            // Update warmup audit counts (already done in internal_advance, but for safety)
             self.health.ingest(t_emit, values, masks, clamped);
         }
 
         Some(row)
     }
 
+    /// Advances the internal engine state by computing features internally and discarding them.
+    /// This is strictly used during the high-speed dataset pre-roll so that all internal 
+    /// buffers (Flow, Micro, Shocks, etc.) are correctly warmed up without returning FeatureRows.
+    pub fn tick_preroll(&mut self, current_processing_ts: i64) {
+        while self.next_emit_ts > 0 && current_processing_ts >= self.next_emit_ts {
+            let _ = self.maybe_emit(current_processing_ts);
+        }
+    }
+
     /// Returns the current health snapshot for telemetry.
     pub fn get_health_report(&self, current_ts: i64) -> health::FeatureHealthReport {
         self.health.snapshot(current_ts)
+    }
+
+    /// Returns a detailed warmup audit.
+    pub fn get_warmup_audit(&self) -> warmup::WarmupTracker {
+        self.warmup.clone()
     }
 
     /// Returns true when minimum data requirements are met for trading.

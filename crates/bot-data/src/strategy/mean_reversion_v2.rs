@@ -67,7 +67,7 @@ impl MeanReversionV2Strategy {
     }
 
     fn is_ranging_regime(&self, obs: &Observation) -> bool {
-        let bb_w = obs.features.bb_width.unwrap_or(1.0);
+        let bb_w = obs.features.bb_width_1m.unwrap_or(1.0);
         let rv5m = obs.features.rv_5m.unwrap_or(1.0);
         bb_w < self.config.max_bb_width && rv5m < self.config.max_rv_5m
     }
@@ -100,7 +100,7 @@ impl Strategy for MeanReversionV2Strategy {
             }
 
             // Target: mean reversion to BB mid
-            let bb_pos = f.bb_pos.unwrap_or(0.5);
+            let bb_pos = f.bb_pos_1m.unwrap_or(0.5);
             let target_hit = if obs.is_long() {
                 bb_pos >= self.config.bb_pos_target
             } else {
@@ -124,8 +124,8 @@ impl Strategy for MeanReversionV2Strategy {
             return StrategyAction::Flat { reason: "mr_trending_regime".to_string() };
         }
 
-        let bb_pos = f.bb_pos.unwrap_or(0.5);
-        let rsi = f.rsi_14.unwrap_or(50.0);
+        let bb_pos = f.bb_pos_1m.unwrap_or(0.5);
+        let rsi = f.rsi_1m.unwrap_or(50.0);
         let spread = f.spread_bps.unwrap_or(100.0);
 
         // Spread gate
@@ -178,10 +178,10 @@ mod tests {
     fn make_obs(bb_w: f64, rv5m: f64, bb_pos: f64, rsi: f64, spread: f64) -> Observation {
         let mut f = FeatureRow::default();
         f.mid_price = Some(100.0);
-        f.bb_width = Some(bb_w);
+        f.bb_width_1m = Some(bb_w);
         f.rv_5m = Some(rv5m);
-        f.bb_pos = Some(bb_pos);
-        f.rsi_14 = Some(rsi);
+        f.bb_pos_1m = Some(bb_pos);
+        f.rsi_1m = Some(rsi);
         f.spread_bps = Some(spread);
         f.rv_30s = Some(0.001);
         Observation {
@@ -226,7 +226,7 @@ mod tests {
         let mut ctx = StrategyContext { symbol: "BTCUSDT".to_string() };
         let mut f = FeatureRow::default();
         f.mid_price = Some(101.0);
-        f.bb_pos = Some(0.55); // past target of 0.50
+        f.bb_pos_1m = Some(0.55); // past target of 0.50
         f.rv_30s = Some(0.001);
         let obs = Observation {
             ts: 2000,

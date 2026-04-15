@@ -150,7 +150,7 @@ impl BatchedReplayReader {
                 "side" | "is_buyer_maker" => {
                      match field {
                          Field::Str(v) => side = Some(v.clone()),
-                         Field::Bool(v) => side = Some(if *v { "Buy".to_string() } else { "Sell".to_string() }), // handle is_buyer_maker bool
+                         Field::Bool(v) => side = Some(if *v { "SELL".to_string() } else { "BUY".to_string() }), // if buyer_maker=true then taker=SELL
                          _ => {}
                      }
                 },

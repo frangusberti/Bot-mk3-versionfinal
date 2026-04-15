@@ -5,10 +5,11 @@ use serde::{Serialize, Deserialize};
 /// warmed up or the required data stream is unavailable.
 /// This struct is written to Parquet for offline training.
 ///
-/// ## Schema v6 (Sprint 2)
-/// - Added 15 new features: absorption (4), persistence (7), regime (4)
-/// - Total: 74 features (was 59 in v5.1).
-/// - OBS_DIM: 148 (74 values + 74 masks)
+/// ## Schema v7 (Pivot ITR)
+/// - Added 9 multi-horizon technical features (RSI/BB at 1m, 5m, 15m)
+/// - Added 3 multi-horizon price slopes (60s, 5m, 15m)
+/// - Total: 83 features.
+/// - OBS_DIM: 166 (83 values + 83 masks)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureRow {
     pub symbol: String,
@@ -20,7 +21,7 @@ pub struct FeatureRow {
     pub spread_bps: Option<f64>,
     pub spread_vs_baseline: Option<f64>,     // z-score of spread vs 2-min EWMA
 
-    // ── B) Returns & Volatility (10 features) ──
+    // ── B) Returns & Volatility (13 features) ──
     pub ret_1s: Option<f64>,
     pub ret_3s: Option<f64>,
     pub ret_5s: Option<f64>,
@@ -31,10 +32,11 @@ pub struct FeatureRow {
     pub rv_5m: Option<f64>,
     pub slope_mid_5s: Option<f64>,           // bps/sec over 5s
     pub slope_mid_15s: Option<f64>,          // bps/sec over 15s
+    pub slope_mid_60s: Option<f64>,          // NEW: bps/sec over 60s (1m)
+    pub slope_mid_5m: Option<f64>,           // NEW: bps/sec over 5m
+    pub slope_mid_15m: Option<f64>,          // NEW: bps/sec over 15m
 
     // ── C) Taker Flow / Tape (10 features) ──
-    // NOTE: taker_buy_ratio_5s removed — algebraically redundant with trade_imbalance_5s
-    //       (ratio = 0.5 + imbalance/2, ρ=1.000 confirmed)
     pub taker_buy_vol_1s: Option<f64>,
     pub taker_sell_vol_1s: Option<f64>,
     pub taker_buy_vol_5s: Option<f64>,
@@ -42,7 +44,7 @@ pub struct FeatureRow {
     pub tape_trades_1s: Option<f64>,
     pub tape_intensity_z: Option<f64>,
     pub trade_imbalance_1s: Option<f64>,     // (buy-sell)/(buy+sell) 1s
-    pub trade_imbalance_5s: Option<f64>,     // canonical flow direction signal
+    pub trade_imbalance_5s: Option<f64>,
     pub trade_imbalance_15s: Option<f64>,
     pub tape_intensity_5s_z: Option<f64>,    // z-score of 5s trade count
 
@@ -70,11 +72,17 @@ pub struct FeatureRow {
     pub funding_rate: Option<f64>,
     pub funding_zscore: Option<f64>,         // z-score, warmup ~24 min
 
-    // ── F) Technicals (slow gating) (4 features) ──
+    // ── F) Technicals (ITR Horizons) (10 features) ──
     pub ema200_distance_pct: Option<f64>,
-    pub rsi_14: Option<f64>,
-    pub bb_width: Option<f64>,
-    pub bb_pos: Option<f64>,
+    pub rsi_1m: Option<f64>,
+    pub bb_width_1m: Option<f64>,
+    pub bb_pos_1m: Option<f64>,
+    pub rsi_5m: Option<f64>,
+    pub bb_width_5m: Option<f64>,
+    pub bb_pos_5m: Option<f64>,
+    pub rsi_15m: Option<f64>,
+    pub bb_width_15m: Option<f64>,
+    pub bb_pos_15m: Option<f64>,
 
     // ── G) Account State (injected externally) (4 features) ──
     pub position_flag: Option<f64>,     // -1, 0, 1
@@ -87,21 +95,19 @@ pub struct FeatureRow {
     pub time_cos: Option<f64>,
 
     // ── I) Open Interest (5 features) ──
-    // NOTE: oi_delta_* are percentage changes: e.g., 5.0 = 5% increase.
-    //       Clamped at ±20% to cover normal and extreme events.
     pub oi_value: Option<f64>,
     pub oi_delta_30s: Option<f64>,           // % change, clamped ±20
     pub oi_delta_1m: Option<f64>,            // % change, clamped ±20
     pub oi_delta_5m: Option<f64>,            // % change, clamped ±20
     pub oi_zscore_30m: Option<f64>,
 
-    // ── J) Absorption (4 features) — Sprint 2 ──
+    // ── J) Absorption (4 features) ──
     pub price_response_buy_5s: Option<f64>,    // bps/qty, clamp ±100
     pub price_response_sell_5s: Option<f64>,   // bps/qty, clamp ±100
     pub microprice_confirmation_5s: Option<f64>, // bps, clamp ±10
     pub breakout_failure_5s: Option<f64>,        // {0, 1}
 
-    // ── K) Persistence (7 features) — Sprint 2 ──
+    // ── K) Persistence (7 features) ──
     pub obi_persistence_buy: Option<f64>,          // [0, 1]
     pub obi_persistence_sell: Option<f64>,         // [0, 1]
     pub flow_persistence_buy: Option<f64>,         // [0, 1]
@@ -110,7 +116,7 @@ pub struct FeatureRow {
     pub depth_deterioration_bid: Option<f64>,      // [0, 1]
     pub depth_deterioration_ask: Option<f64>,      // [0, 1]
 
-    // ── L) Regime (4 features) — Sprint 2 ──
+    // ── L) Regime (4 features) ──
     pub regime_trend: Option<f64>,    // [0, 1] score
     pub regime_range: Option<f64>,    // [0, 1] residual score
     pub regime_shock: Option<f64>,    // [0, 1] score
@@ -142,6 +148,9 @@ impl FeatureRow {
             rv_5m: None,
             slope_mid_5s: None,
             slope_mid_15s: None,
+            slope_mid_60s: None,
+            slope_mid_5m: None,
+            slope_mid_15m: None,
             taker_buy_vol_1s: None,
             taker_sell_vol_1s: None,
             taker_buy_vol_5s: None,
@@ -173,9 +182,15 @@ impl FeatureRow {
             funding_rate: None,
             funding_zscore: None,
             ema200_distance_pct: None,
-            rsi_14: None,
-            bb_width: None,
-            bb_pos: None,
+            rsi_1m: None,
+            bb_width_1m: None,
+            bb_pos_1m: None,
+            rsi_5m: None,
+            bb_width_5m: None,
+            bb_pos_5m: None,
+            rsi_15m: None,
+            bb_width_15m: None,
+            bb_pos_15m: None,
             position_flag: None,
             latent_pnl_pct: None,
             max_pnl_pct: None,
@@ -187,7 +202,6 @@ impl FeatureRow {
             oi_delta_1m: None,
             oi_delta_5m: None,
             oi_zscore_30m: None,
-            // Sprint 2
             price_response_buy_5s: None,
             price_response_sell_5s: None,
             microprice_confirmation_5s: None,
@@ -206,30 +220,30 @@ impl FeatureRow {
         }
     }
 
-    pub fn to_obs_vec(&self) -> (Vec<f32>, [bool; 74]) {
-        let mut values = Vec::with_capacity(74);
-        let mut masks = Vec::with_capacity(74);
-        let mut clamped = [false; 74];
+    pub fn to_obs_vec(&self) -> (Vec<f32>, [bool; 83]) {
+        let mut values = Vec::with_capacity(83);
+        let mut masks = Vec::with_capacity(83);
+        let mut clamped = [false; 83];
         let mut idx = 0;
 
         let raw = |v: f64, _c: &mut bool| v as f32;
-        
         let clamp_pct = |v: f64, c: &mut bool| {
             if v < -1.0 || v > 1.0 { *c = true; }
             v.clamp(-1.0, 1.0) as f32
         };
-
         let clamp_z = |v: f64, c: &mut bool| {
             if v < -10.0 || v > 10.0 { *c = true; }
             v.clamp(-10.0, 10.0) as f32
         };
-
-        // For OI percentage deltas. Semantic: percentage change (e.g., 5.0 = 5%).
-        // Clamped at ±20% to cover both normal variation and extreme liquidation cascades.
         let clamp_oi_delta = |v: f64, c: &mut bool| {
             if v < -20.0 || v > 20.0 { *c = true; }
             v.clamp(-20.0, 20.0) as f32
         };
+        let clamp_abs = |v: f64, c: &mut bool| {
+            if v < -100.0 || v > 100.0 { *c = true; }
+            v.clamp(-100.0, 100.0) as f32
+        };
+        let bounded01 = |v: f64, _c: &mut bool| v.clamp(0.0, 1.0) as f32;
 
         macro_rules! add {
             ($opt:expr, $tr:expr) => {
@@ -265,7 +279,7 @@ impl FeatureRow {
         add!(self.spread_bps, raw);
         add!(self.spread_vs_baseline, clamp_z);
 
-        // B) Returns & Volatility (10)
+        // B) Returns & Volatility (13)
         add!(self.ret_1s, clamp_pct);
         add!(self.ret_3s, clamp_pct);
         add!(self.ret_5s, clamp_pct);
@@ -276,8 +290,11 @@ impl FeatureRow {
         add!(self.rv_5m, clamp_pct);
         add!(self.slope_mid_5s, clamp_z);
         add!(self.slope_mid_15s, clamp_z);
+        add!(self.slope_mid_60s, clamp_z);
+        add!(self.slope_mid_5m, clamp_z);
+        add!(self.slope_mid_15m, clamp_z);
 
-        // C) Taker Flow (10) — taker_buy_ratio_5s removed
+        // C) Taker Flow (10)
         add!(self.taker_buy_vol_1s, raw);
         add!(self.taker_sell_vol_1s, raw);
         add!(self.taker_buy_vol_5s, raw);
@@ -313,11 +330,17 @@ impl FeatureRow {
         add!(self.funding_rate, clamp_pct);
         add!(self.funding_zscore, clamp_z);
 
-        // F) Technicals (4)
+        // F) Technicals (10)
         add!(self.ema200_distance_pct, clamp_pct);
-        add_fallback!(self.rsi_14, 50.0, raw);
-        add!(self.bb_width, raw);
-        add!(self.bb_pos, clamp_z);
+        add_fallback!(self.rsi_1m, 50.0, raw);
+        add!(self.bb_width_1m, raw);
+        add!(self.bb_pos_1m, clamp_z);
+        add_fallback!(self.rsi_5m, 50.0, raw);
+        add!(self.bb_width_5m, raw);
+        add!(self.bb_pos_5m, clamp_z);
+        add_fallback!(self.rsi_15m, 50.0, raw);
+        add!(self.bb_width_15m, raw);
+        add!(self.bb_pos_15m, clamp_z);
 
         // G) Account (4)
         add!(self.position_flag, raw);
@@ -329,29 +352,20 @@ impl FeatureRow {
         add!(self.time_sin, raw);
         add!(self.time_cos, raw);
 
-        // I) Open Interest (5) — oi_delta_* use clamp_oi_delta (±20%)
+        // I) Open Interest (5)
         add!(self.oi_value, raw);
         add!(self.oi_delta_30s, clamp_oi_delta);
         add!(self.oi_delta_1m, clamp_oi_delta);
         add!(self.oi_delta_5m, clamp_oi_delta);
         add!(self.oi_zscore_30m, clamp_z);
 
-        // Clamp for absorption response features (±100 bps/qty)
-        let clamp_abs = |v: f64, c: &mut bool| {
-            if v < -100.0 || v > 100.0 { *c = true; }
-            v.clamp(-100.0, 100.0) as f32
-        };
-
-        // Bounded [0,1] — no clamping needed, use raw
-        let bounded01 = |v: f64, _c: &mut bool| v.clamp(0.0, 1.0) as f32;
-
         // J) Absorption (4)
         add!(self.price_response_buy_5s, clamp_abs);
         add!(self.price_response_sell_5s, clamp_abs);
         add!(self.microprice_confirmation_5s, clamp_z);
-        add!(self.breakout_failure_5s, raw);  // {0, 1} binary
+        add!(self.breakout_failure_5s, raw);
 
-        // K) Persistence (7) — all [0, 1]
+        // K) Persistence (7)
         add!(self.obi_persistence_buy, bounded01);
         add!(self.obi_persistence_sell, bounded01);
         add!(self.flow_persistence_buy, bounded01);
@@ -360,18 +374,16 @@ impl FeatureRow {
         add!(self.depth_deterioration_bid, bounded01);
         add!(self.depth_deterioration_ask, bounded01);
 
-        // L) Regime (4) — all [0, 1]
+        // L) Regime (4)
         add!(self.regime_trend, bounded01);
         add!(self.regime_range, bounded01);
         add!(self.regime_shock, bounded01);
         add!(self.regime_dead, bounded01);
 
-        // Concatenate Masks after Values
         values.extend(masks);
         (values, clamped)
     }
 
-    /// Number of features in the observation vector (74 values + 74 masks).
-    pub const OBS_DIM: usize = 148;
-    pub const OBS_SCHEMA_VERSION: u16 = 6;
+    pub const OBS_DIM: usize = 166;
+    pub const OBS_SCHEMA_VERSION: u16 = 7;
 }

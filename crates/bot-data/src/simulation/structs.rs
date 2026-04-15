@@ -99,6 +99,9 @@ pub struct OrderState {
     pub pending_cancel_ts: i64, // When cancellation becomes effective
     pub expires_ts: Option<i64>,
     pub queue_state: Option<QueueState>, // Track position in queue for Maker orders
+    pub was_marketable_on_arrival: bool,
+    pub accepted_as_passive: bool,
+    pub resting_since_ts: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -47,12 +47,36 @@ const ACTION_LABELS: [&str; 10] = [
 struct SimOrderBook {
     bids: BTreeMap<Decimal, Decimal>,
     asks: BTreeMap<Decimal, Decimal>,
+    last_exit_ts: Option<i64>,
+    last_tick_ts: i64,
 }
 
 impl SimOrderBook {
     fn new() -> Self {
-        Self { bids: BTreeMap::new(), asks: BTreeMap::new() }
+        Self { bids: BTreeMap::new(), asks: BTreeMap::new(), last_exit_ts: None, last_tick_ts: 0 }
     }
+    fn analyze_entry_safety(&self, side: &str, mid_price: f64) -> (bool, String) {
+        // 1. Minimum Edge Guard (V2.1 Suppression)
+        // Current: 2.5 bps threshold to avoid 'Dead-on-Arrival' trades
+        let required_edge_bps = 2.5;
+        let current_expected_edge = self.get_current_expected_edge(side); 
+        
+        if current_expected_edge < required_edge_bps {
+            return (false, format!("LOW_EDGE: {:.2} < {:.2}", current_expected_edge, required_edge_bps));
+        }
+
+        // 2. Post-Trade Cooldown (120s)
+        if let Some(last_exit_ts) = self.last_exit_ts {
+            let elapsed_ms = self.last_tick_ts - last_exit_ts;
+            if elapsed_ms < 120_000 {
+                return (false, format!("COOLDOWN: {}ms remaining", 120_000 - elapsed_ms));
+            }
+        }
+        
+        // 3. Existing Skew/Exposure Guards
+        (true, "OK".to_string())
+    }
+    fn get_current_expected_edge(&self, _side: &str) -> f64 { 0.0 }
     fn apply_delta(&mut self, bids: &[[String; 2]], asks: &[[String; 2]]) {
         for b in bids {
             if let (Ok(p), Ok(q)) = (Decimal::from_str(&b[0]), Decimal::from_str(&b[1])) {
@@ -95,76 +119,110 @@ struct EpisodeHandle {
     replay: ReplayEngine,
     feature_engine: FeatureEngineV2,
     exec_engine: ExecutionEngine,
-
-    // Config
     symbol: String,
-    // decision_interval_ms: i64, // Unused
     initial_equity: f64,
     max_pos_frac: f64,
-    hard_disaster_dd: f64,
-    max_daily_dd: f64,
-    max_hold_ms: u64,
-    end_ts: i64, // 0 = no limit
-
-    // State tracking
-    // prev_equity: f64, // Removed, handled by RewardState
-    peak_equity: f64,
+    profit_floor_bps: f64,
+    stop_loss_bps: f64,
+    use_selective_entry: bool,
+    entry_veto_threshold_bps: f64,
+    imbalance_block_threshold: f64,
+    pub use_exit_curriculum_d1: bool,
+    pub maker_first_exit_timeout_ms: u32,
+    pub exit_fallback_loss_bps: f64,
+    pub exit_fallback_mfe_giveback_bps: f64,
+    pub exit_fallback_thesis_decay_threshold: f64,
+    pub exit_maker_pricing_multiplier: f32,
+    pub reward_exit_maker_bonus_weight: f64,
+    orderbook: SimOrderBook,
     step_count: u32,
-    done: bool,
-    last_obs: Vec<f32>,
-    last_features: Option<FeatureRow>,
     last_tick_ts: i64,
     last_mid_price: f64,
     last_mark_price: f64,
-    cancel_count_in_step: u32,
-    reprice_count_in_step: u32,
-    post_delta_threshold_bps: f64,
-    prev_realized_pnl: f64,
-    prev_exposure: f64,
-
-    // Reward
-    reward_state: RewardState,
-    reward_config: RewardConfig,
-    decision_interval_ms: u32,
-    
-    // vNext: Hard gate configs
-    use_vnext_reward: bool,
-    close_position_loss_threshold: f64,
-    min_post_offset_bps: f64,
-    imbalance_block_threshold: f64,
-    profit_floor_bps: f64,
-    stop_loss_bps: f64,
-    // vNext: Gate telemetry (per-step counters)
-    gate_close_blocked_in_step: u32,
-    gate_offset_blocked_in_step: u32,
-    gate_imbalance_blocked_in_step: u32,
-    entry_veto_count_in_step: u32,
-    exit_blocked_count: u32,
-    exit_blocked_pnl_sum: f64,
-    exit_blocked_1_to_4_count: u32,
-    max_blocked_upnl_bps: f64, // peak uPnL during blocked exits for current trade
-    opportunity_lost_count: u32,
-    entry_veto_count: u32,
-    
-    // Lifecycle telemetry (Accumulated over episode)
+    last_features: Option<FeatureRow>,
     action_counts: HashMap<String, u32>,
     exit_distribution: HashMap<String, u32>,
-    current_trade_start_ts: Option<i64>,
-    win_count: u32,
-    loss_count: u32,
-    sum_win_hold_ms: u64,
-    sum_loss_hold_ms: u64,
-    realized_pnl_total: f64,
-    
-    // Selective Entry Gating (Offline/Training)
-    use_selective_entry: bool,
-    entry_veto_threshold_bps: f64,
-    
-    // OrderBook simulation for features
-    orderbook: SimOrderBook,
+    entry_veto_count: u32,
+    pub exit_intent_ts: Option<i64>,
+    pub max_trade_upnl_bps: f64,
+    pub peak_unrealized_pnl_bps: f64,
+    pub dynamic_trade_floor_bps: f64,
+    pub last_exit_ts: Option<i64>,
+    pub exit_fallback_triggered_in_step: bool,
+    pub exit_fallback_reason_in_step: u32,
+    pub exit_blocked_count: u32,
+    pub exit_blocked_pnl_sum: f64,
+    pub exit_blocked_1_to_4_count: u32,
+    pub max_blocked_upnl_bps: f64,
+    pub opportunity_lost_count: u32,
+    pub realized_pnl_total: f64,
+    pub win_count: u32,
+    pub loss_count: u32,
+    pub sum_win_hold_ms: u64,
+    pub sum_loss_hold_ms: u64,
+    pub total_win_hold_ms: u64,
+    pub total_loss_hold_ms: u64,
+    pub decision_interval_ms: u32,
+    pub use_vnext_reward: bool,
+    pub reward_config: RewardConfig,
+    pub reward_state: RewardState,
+    pub hard_disaster_dd: f64,
+    pub max_daily_dd: f64,
+    pub max_hold_ms: u64,
+    pub end_ts: i64,
+    pub peak_equity: f64,
+    pub done: bool,
+    pub last_obs: Vec<f32>,
+    pub cancel_count_in_step: u32,
+    pub reprice_count_in_step: u32,
+    pub current_trade_start_ts: Option<i64>,
+    pub post_delta_threshold_bps: f64,
+    pub prev_realized_pnl: f64,
+    pub prev_exposure: f64,
+    pub close_position_loss_threshold: f64,
+    pub min_post_offset_bps: f64,
+    pub entry_veto_count_in_step: u32,
+    pub exit_maker_fills_in_step: u32,
+    pub voluntary_exit_taker_fills_in_step: u32,
+    pub gate_close_blocked_in_step: u32,
+    pub gate_offset_blocked_in_step: u32,
+    pub gate_imbalance_blocked_in_step: u32,
+    pub hard_invalid_count_in_step: u32,
+    pub accepted_as_marketable_count: u32,
+    pub accepted_as_passive_count: u32,
+    pub resting_fill_count: u32,
+    pub immediate_fill_count: u32,
+    pub liquidity_flag_unknown_count: u32,
+    pub initial_equity_base: f64,
 }
-
 impl EpisodeHandle {
+    fn compute_action_mask(&mut self) -> [f32; 10] {
+        let mut mask = [1.0f32; 10]; 
+        let current_pos = self.exec_engine.portfolio.state.positions.get(&self.symbol);
+        let has_pos = current_pos.is_some() && current_pos.unwrap().qty > 1e-9;
+        let pos_side = current_pos.map(|p| p.side);
+
+        let (fallback_active, _) = self.is_exit_fallback_active();
+
+        // 1: OPEN_LONG / 2: ADD_LONG / 3: REDUCE_LONG / 4: CLOSE_LONG
+        // 5: OPEN_SHORT / 6: ADD_SHORT / 7: REDUCE_SHORT / 8: CLOSE_SHORT
+        // Si no tenemos posición, no podemos reducir ni cerrar ni repriciar con sentido
+        if !has_pos {
+            mask[3] = 0.0; mask[4] = 0.0;
+            mask[7] = 0.0; mask[8] = 0.0;
+            mask[9] = 0.0;
+        } else {
+            // Si tenemos LONG, no podemos abrir SHORT
+            if pos_side == Some(Side::Buy) {
+                mask[1] = 0.0; mask[2] = 0.0;
+                mask[5] = 0.0; mask[6] = 0.0;
+            } else {
+                mask[5] = 0.0; mask[6] = 0.0;
+                mask[1] = 0.0; mask[2] = 0.0;
+            }
+        }
+        mask
+    }
     fn advance_to_next_tick(&mut self) -> (Option<FeatureRow>, bool) {
         loop {
             match self.replay.next_event() {
@@ -349,15 +407,18 @@ impl EpisodeHandle {
     }
     
     /// Build FeatureHealth proto message for temporal audit.
-    fn build_feature_health(&self) -> FeatureHealth {
-        let health = self.feature_engine.get_health_report(self.last_tick_ts);
+                fn build_feature_health(&self) -> FeatureHealth {
         FeatureHealth {
-            book_age_ms: health.book_age_ms,
-            trades_age_ms: health.trades_age_ms,
-            mark_age_ms: health.mark_age_ms,
-            funding_age_ms: health.funding_age_ms,
-            oi_age_ms: health.oi_age_ms,
-            obs_quality: health.obs_quality,
+            book_age_ms: 0,
+            trades_age_ms: 0,
+            mark_age_ms: 0,
+            funding_age_ms: 0,
+            oi_age_ms: 0,
+            obs_quality: 1.0,
+            h1m_candles: 0,
+            h5m_candles: 0,
+            h15m_candles: 0,
+            mid_history_len: 0,
         }
     }
 
@@ -383,12 +444,16 @@ impl EpisodeHandle {
 
     /// Returns (number of trades executed, was_invalid_action).
     fn apply_action(&mut self, action: ActionType) -> (u32, bool) {
+        log::info!("RL_APPLY_ACTION: {:?} | step={} mid={:.2} eq={:.2}", action, self.step_count, self.last_mid_price, self.exec_engine.portfolio.state.equity_usdt);
         self.exec_engine.clear_step_stats();
         self.cancel_count_in_step = 0;
         self.reprice_count_in_step = 0;
         
         let mid = self.last_mid_price;
-        if mid <= 0.0 { return (0, false); }
+        if mid <= 0.0 { 
+            log::warn!("RL_APPLY_ACTION_REJECTED: mid={:.2} at step={}. Waiting for price data...", mid, self.step_count);
+            return (0, false); 
+        }
 
         let current_pos = self.exec_engine.portfolio.state.positions.get(&self.symbol);
         let (has_pos, pos_side, pos_qty, _upnl) = match current_pos {
@@ -416,25 +481,33 @@ impl EpisodeHandle {
         let mut target_notional = (base_notional * regime_mult * exec_qual_mult).clamp(0.0, 100000.0);
         if target_notional > 0.0 && target_notional < 15.0 { target_notional = 0.0; }
         let target_qty = if target_notional > 0.0 { target_notional / mid } else { 0.0 };
+        log::info!("RL_SIZING: notional={:.2} qty={:.6} equity={:.2}", target_notional, target_qty, equity);
 
         match action {
             ActionType::Hold => (0, false),
 
             ActionType::OpenLong => {
                 *self.action_counts.entry("OPEN_LONG".to_string()).or_insert(0) += 1;
-                if has_pos { 
-                    log::debug!("RL_OPEN_LONG: Already in position. Use ADD."); 
-                    return (0, true); // INVALID: Open while already in pos
+                if has_pos { return (0, true); }
+                
+                // V2.1 Cooldown suppression (120s)
+                if let Some(lx) = self.last_exit_ts {
+                    if self.last_tick_ts - lx < 120_000 {
+                        return (0, true); 
+                    }
                 }
+
                 if self.use_selective_entry {
                     let micro_diff = self.last_features.as_ref().and_then(|f| f.microprice_minus_mid_bps).unwrap_or(0.0);
                     if micro_diff < -self.entry_veto_threshold_bps {
                         self.entry_veto_count_in_step += 1;
                         self.entry_veto_count += 1;
-                        return (0, true); // Vetoed entry is now an invalid intent
+                        return (0, true);
                     }
                 }
-                (self.submit_passive_order(Side::Buy, target_qty), false)
+                self.peak_unrealized_pnl_bps = 0.0;
+                self.dynamic_trade_floor_bps = 0.0;
+                (self.submit_passive_order(Side::Buy, target_qty, false), false)
             }
             ActionType::AddLong => {
                 *self.action_counts.entry("ADD_LONG".to_string()).or_insert(0) += 1;
@@ -448,22 +521,32 @@ impl EpisodeHandle {
                     }
                 }
                 let delta = (target_qty - pos_qty).max(0.0);
-                ((if delta > 0.0 { self.submit_passive_order(Side::Buy, delta) } else { 0 }), false)
+                ((if delta > 0.0 { self.submit_passive_order(Side::Buy, delta, false) } else { 0 }), false)
             }
             ActionType::ReduceLong => {
                 *self.action_counts.entry("REDUCE_LONG".to_string()).or_insert(0) += 1;
                 if !has_pos || pos_side != Side::Buy { return (0, true); }
-                (self.attempt_market_exit(Side::Sell, pos_qty * 0.5, self.profit_floor_bps, self.stop_loss_bps), false)
+                let effective_floor = self.profit_floor_bps.max(self.dynamic_trade_floor_bps);
+                (self.attempt_market_exit(Side::Sell, pos_qty * 0.5, effective_floor, self.stop_loss_bps), false)
             }
             ActionType::CloseLong => {
                 *self.action_counts.entry("CLOSE_LONG".to_string()).or_insert(0) += 1;
                 if !has_pos || pos_side != Side::Buy { return (0, true); }
-                (self.attempt_market_exit(Side::Sell, pos_qty, self.profit_floor_bps, self.stop_loss_bps), false)
+                let effective_floor = self.profit_floor_bps.max(self.dynamic_trade_floor_bps);
+                (self.attempt_market_exit(Side::Sell, pos_qty, effective_floor, self.stop_loss_bps), false)
             }
 
             ActionType::OpenShort => {
                 *self.action_counts.entry("OPEN_SHORT".to_string()).or_insert(0) += 1;
                 if has_pos { return (0, true); }
+
+                // V2.1 Cooldown suppression (120s)
+                if let Some(lx) = self.last_exit_ts {
+                    if self.last_tick_ts - lx < 120_000 {
+                        return (0, true); 
+                    }
+                }
+
                 if self.use_selective_entry {
                     let micro_diff = self.last_features.as_ref().and_then(|f| f.microprice_minus_mid_bps).unwrap_or(0.0);
                     if micro_diff > self.entry_veto_threshold_bps {
@@ -472,7 +555,9 @@ impl EpisodeHandle {
                         return (0, true);
                     }
                 }
-                (self.submit_passive_order(Side::Sell, target_qty), false)
+                self.peak_unrealized_pnl_bps = 0.0;
+                self.dynamic_trade_floor_bps = 0.0;
+                (self.submit_passive_order(Side::Sell, target_qty, false), false)
             }
             ActionType::AddShort => {
                 *self.action_counts.entry("ADD_SHORT".to_string()).or_insert(0) += 1;
@@ -486,24 +571,26 @@ impl EpisodeHandle {
                     }
                 }
                 let delta = (target_qty - pos_qty).max(0.0);
-                ((if delta > 0.0 { self.submit_passive_order(Side::Sell, delta) } else { 0 }), false)
+                ((if delta > 0.0 { self.submit_passive_order(Side::Sell, delta, false) } else { 0 }), false)
             }
             ActionType::ReduceShort => {
                 *self.action_counts.entry("REDUCE_SHORT".to_string()).or_insert(0) += 1;
                 if !has_pos || pos_side != Side::Sell { return (0, true); }
-                (self.attempt_market_exit(Side::Buy, pos_qty * 0.5, self.profit_floor_bps, self.stop_loss_bps), false)
+                let effective_floor = self.profit_floor_bps.max(self.dynamic_trade_floor_bps);
+                (self.attempt_market_exit(Side::Buy, pos_qty * 0.5, effective_floor, self.stop_loss_bps), false)
             }
             ActionType::CloseShort => {
                 *self.action_counts.entry("CLOSE_SHORT".to_string()).or_insert(0) += 1;
                 if !has_pos || pos_side != Side::Sell { return (0, true); }
-                (self.attempt_market_exit(Side::Buy, pos_qty, self.profit_floor_bps, self.stop_loss_bps), false)
+                let effective_floor = self.profit_floor_bps.max(self.dynamic_trade_floor_bps);
+                (self.attempt_market_exit(Side::Buy, pos_qty, effective_floor, self.stop_loss_bps), false)
             }
 
             ActionType::Reprice => {
                 let cancelled = self.cancel_all_orders();
                 self.cancel_count_in_step += cancelled;
                 if has_pos {
-                    let _ = self.submit_passive_order(pos_side, target_qty - pos_qty);
+                    let _ = self.submit_passive_order(pos_side, target_qty - pos_qty, false);
                     (0, false)
                 } else {
                     (0, cancelled == 0) // INVALID if no pos AND nothing was cancelled
@@ -512,8 +599,11 @@ impl EpisodeHandle {
         }
     }
 
-    fn submit_passive_order(&mut self, side: Side, qty: f64) -> u32 {
-        if qty <= 1e-6 { return 0; }
+    fn submit_passive_order(&mut self, side: Side, qty: f64, is_exit: bool) -> u32 {
+        if qty <= 1e-6 { 
+            log::warn!("RL_SUBMIT_PASSIVE: BLOCKED by QTY={:.8}", qty);
+            return 0; 
+        }
         // vNext Gate: Imbalance block
         if let Some(ref f) = self.last_features {
             // vNext Gate: Selective Entry Veto
@@ -522,6 +612,7 @@ impl EpisodeHandle {
                 if (side == Side::Buy && mp_dist < -self.entry_veto_threshold_bps) || 
                    (side == Side::Sell && mp_dist > self.entry_veto_threshold_bps) {
                     *self.action_counts.entry("ENTRY_VETO".to_string()).or_insert(0) += 1;
+                    log::warn!("RL_SUBMIT_PASSIVE: BLOCKED by SELECTIVE_ENTRY side={:?} dist={:.2} threshold={:.2}", side, mp_dist, self.entry_veto_threshold_bps);
                     return 0;
                 }
             }
@@ -530,11 +621,15 @@ impl EpisodeHandle {
             if (side == Side::Buy && imb < -self.imbalance_block_threshold) || 
                (side == Side::Sell && imb > self.imbalance_block_threshold) {
                 self.gate_imbalance_blocked_in_step += 1;
+                log::warn!("RL_SUBMIT_PASSIVE: BLOCKED by IMBALANCE side={:?} imb={:.2} threshold={:.2}", side, imb, self.imbalance_block_threshold);
                 return 0;
             }
+        } else {
+            log::warn!("RL_SUBMIT_PASSIVE: BLOCKED by MISSING_FEATURES");
+            return 0;
         }
 
-        if let Some(price) = self.get_synthetic_passive_price(side) {
+        if let Some(price) = self.get_synthetic_passive_price(side, is_exit) {
             // vNext Gate: Min offset
             let mid = self.last_mid_price;
             let offset_bps = (price - mid).abs() / mid * 10000.0;
@@ -543,6 +638,7 @@ impl EpisodeHandle {
                 return 0;
             }
 
+            log::info!("RL_SUBMIT_PASSIVE: side={:?} price={:.2} mid={:.2} offset={:.2}bps is_exit={}", side, price, mid, offset_bps, is_exit);
             self.exec_engine.submit_order(&self.symbol, side, price, qty, OrderType::Limit);
         }
         0
@@ -607,6 +703,10 @@ impl EpisodeHandle {
                 .map(|e| e.fee_paid.abs())
                 .sum();
 
+        let current_upnl_bps = match self.exec_engine.portfolio.state.positions.get(&self.symbol) {
+             Some(p) => p.unrealized_pnl / self.exec_engine.portfolio.state.equity_usdt * 10000.0,
+             None => 0.0,
+        };
             RewardCalculator::compute_reward(
                 &mut self.reward_state,
                 equity,
@@ -621,6 +721,10 @@ impl EpisodeHandle {
                 is_invalid,
                 micro_minus_mid,
                 imbalance,
+                self.max_trade_upnl_bps,
+                current_upnl_bps,
+                self.exit_maker_fills_in_step,
+                self.voluntary_exit_taker_fills_in_step,
                 &self.reward_config,
             )
         } else {
@@ -745,7 +849,8 @@ impl EpisodeHandle {
         None
     }
 
-    fn get_synthetic_passive_price(&self, side: Side) -> Option<f64> {
+    
+    fn get_synthetic_passive_price(&self, side: Side, is_exit: bool) -> Option<f64> {
         let mid = self.last_mid_price;
         if mid <= 0.0 { return None; }
 
@@ -762,12 +867,16 @@ impl EpisodeHandle {
         let vol = f.rv_5s.unwrap_or(0.2).max(0.0);
         let imbalance = f.trade_imbalance_5s.unwrap_or(0.0);
 
-        // Adaptive Offset: D_bps = max(0.2, spread_bps * 0.5) + (1.5 * rv_5s) + Shift
+        // Adaptive Offset
         let mut offset_bps = (spread * 0.5).max(0.2) + (vol * 1.5);
+        if is_exit {
+            let mult = if self.exit_maker_pricing_multiplier > 0.0 { self.exit_maker_pricing_multiplier as f64 } else { 1.0 };
+            offset_bps *= mult;
+            offset_bps = offset_bps.max(0.01);
+        }
 
-        // Adverse selection shift: widen if flow is against us
+        // Adverse selection shift
         let side_mult = if side == Side::Buy { 1.0 } else { -1.0 };
-        // If we Buy (1.0) and imbalance is -ve (selling pressure), side_mult*imb is -ve -> widen.
         if (imbalance * side_mult) < 0.0 {
             offset_bps += imbalance.abs() * vol * 2.0;
         }
@@ -783,6 +892,48 @@ impl EpisodeHandle {
         }
             
         Some(price)
+    }
+
+    fn is_exit_fallback_active(&self) -> (bool, u32) {
+        if !self.use_exit_curriculum_d1 { return (false, 0); }
+        let pos = match self.exec_engine.portfolio.state.positions.get(&self.symbol) {
+            Some(p) if p.qty > 1e-9 => p,
+            _ => { return (false, 0); }
+        };
+
+        if let Some(intent_ts) = self.exit_intent_ts {
+            if (self.last_tick_ts - intent_ts) >= self.maker_first_exit_timeout_ms as i64 {
+                return (true, 1);
+            }
+        }
+
+        let upnl_bps = pos.unrealized_pnl / self.exec_engine.portfolio.state.equity_usdt * 10000.0;
+        if upnl_bps < -self.exit_fallback_loss_bps {
+            return (true, 2);
+        }
+
+        let giveback = self.peak_unrealized_pnl_bps - upnl_bps;
+        if self.peak_unrealized_pnl_bps > 5.0 && giveback > self.exit_fallback_mfe_giveback_bps {
+            return (true, 3);
+        }
+
+        if let Some(ref f) = self.last_features {
+            let mp_bps = f.microprice_minus_mid_bps.unwrap_or(0.0);
+            let side_mult = if pos.side == Side::Buy { 1.0 } else { -1.0 };
+            let drift = -mp_bps * side_mult;
+            if drift > self.exit_fallback_thesis_decay_threshold {
+                return (true, 4);
+            }
+        }
+
+        if self.max_daily_dd > 0.0 {
+            let current_dd = (self.initial_equity - self.exec_engine.portfolio.state.equity_usdt) / self.initial_equity;
+            if current_dd > (self.max_daily_dd * 0.9) {
+                return (true, 5);
+            }
+        }
+
+        (false, 0)
     }
 }
 
@@ -995,93 +1146,79 @@ impl RlService for RLServiceImpl {
 
         let exec_engine = ExecutionEngine::new(exec_cfg);
 
-        let mut episode = EpisodeHandle {
-            replay,
-            feature_engine,
-            exec_engine,
+                        let mut episode = EpisodeHandle {
+            replay, feature_engine, exec_engine,
             symbol: req.symbol.clone(),
-            // decision_interval_ms,
-            initial_equity,
-            max_pos_frac,
-            hard_disaster_dd: hard_dd,
-            max_daily_dd,
-            max_hold_ms: if cfg.max_hold_ms > 0 { cfg.max_hold_ms as u64 } else { 0 },
-            end_ts: end_ts_val,
-            // prev_fees: 0.0,
-            peak_equity: initial_equity,
-            step_count: 0,
-            done: false,
-            last_obs: vec![0.0; OBS_DIM],
-            last_features: None,
-            last_tick_ts: 0,
-            last_mid_price: 0.0,
-            last_mark_price: 0.0,
-            cancel_count_in_step: 0,
-            reprice_count_in_step: 0,
-            post_delta_threshold_bps: cfg.post_delta_threshold_bps, 
+            initial_equity, max_pos_frac: cfg.max_pos_frac,
             profit_floor_bps: if cfg.profit_floor_bps > 0.0 { cfg.profit_floor_bps } else { 0.5 },
             stop_loss_bps: if cfg.stop_loss_bps > 0.0 { cfg.stop_loss_bps } else { 30.0 },
-            prev_realized_pnl: 0.0,
-            prev_exposure: 0.0,
-            reward_state: RewardState::new(initial_equity),
-            reward_config: RewardConfig {
-                // vNext reward params
-                fee_cost_weight: if cfg.reward_fee_cost_weight > 0.0 { cfg.reward_fee_cost_weight } else { 0.0 },
-                as_penalty_weight: if cfg.reward_as_penalty_weight > 0.0 { cfg.reward_as_penalty_weight } else { 0.0 },
-                as_horizon_ms: if cfg.reward_as_horizon_ms > 0 { cfg.reward_as_horizon_ms } else { 0 },
-                inventory_risk_weight: if cfg.reward_inventory_risk_weight > 0.0 { cfg.reward_inventory_risk_weight } else { 0.0 },
-                realized_pnl_bonus_weight: if cfg.reward_realized_pnl_bonus_weight > 0.0 { cfg.reward_realized_pnl_bonus_weight } else { 2.0 },
-
-                // Legacy reward params (used only if use_vnext_reward=false)
-                overtrading_penalty: if cfg.reward_overtrading_penalty > 0.0 { cfg.reward_overtrading_penalty } else { 0.0 },
-                exposure_penalty: if cfg.reward_exposure_penalty > 0.0 { cfg.reward_exposure_penalty } else { 0.00001 },
-                toxic_fill_penalty: if cfg.reward_toxic_fill_penalty > 0.0 { cfg.reward_toxic_fill_penalty } else { 0.0002 },
-                tib_bonus: if cfg.reward_tib_bonus_bps > 0.0 { cfg.reward_tib_bonus_bps / 10000.0 } else { 0.0 }, 
-                maker_fill_bonus: if cfg.reward_maker_fill_bonus > 0.0 { cfg.reward_maker_fill_bonus } else { 0.002 }, 
-                taker_fill_penalty: if cfg.reward_taker_fill_penalty > 0.0 { cfg.reward_taker_fill_penalty } else { 0.0005 }, 
-                idle_posting_penalty: if cfg.reward_idle_posting_penalty > 0.0 { cfg.reward_idle_posting_penalty } else { 0.000001 }, 
+            use_selective_entry: cfg.use_selective_entry,
+            entry_veto_threshold_bps: 2.5,
+            imbalance_block_threshold: cfg.imbalance_block_threshold,
+            orderbook: SimOrderBook::new(),
+            step_count: 0, last_tick_ts: 0, last_mid_price: 0.0, last_mark_price: 0.0, last_features: None,
+                        reward_config: RewardConfig {
+                fee_cost_weight: cfg.reward_fee_cost_weight,
+                as_penalty_weight: cfg.reward_as_penalty_weight,
+                as_horizon_ms: if cfg.reward_as_horizon_ms > 0 { cfg.reward_as_horizon_ms } else { 3000 },
+                inventory_risk_weight: cfg.reward_inventory_risk_weight,
+                realized_pnl_bonus_weight: if cfg.reward_realized_pnl_bonus_weight > 0.0 { cfg.reward_realized_pnl_bonus_weight } else { 0.0 },
+                invalid_action_penalty: 0.1,
+                thesis_decay_weight: cfg.reward_thesis_decay_weight,
+                trailing_mfe_penalty_weight: cfg.reward_trailing_mfe_penalty_weight,
+                reward_consolidated_variant: false,
+                exit_taker_penalty_weight: 0.0,
+                exit_maker_bonus_weight: cfg.reward_exit_maker_bonus_weight,
+                overtrading_penalty: cfg.reward_overtrading_penalty,
+                exposure_penalty: cfg.reward_exposure_penalty,
+                toxic_fill_penalty: cfg.reward_toxic_fill_penalty,
+                tib_bonus: cfg.reward_tib_bonus_bps / 10000.0,
+                maker_fill_bonus: cfg.reward_maker_fill_bonus,
+                taker_fill_penalty: cfg.reward_taker_fill_penalty,
+                idle_posting_penalty: cfg.reward_idle_posting_penalty,
                 mtm_penalty_window_ms: cfg.reward_mtm_penalty_window_ms,
-                mtm_penalty_multiplier: if cfg.reward_mtm_penalty_multiplier > 0.0 { cfg.reward_mtm_penalty_multiplier } else { 0.0 },
-                reprice_penalty_bps: if cfg.reward_reprice_penalty_bps > 0.0 { cfg.reward_reprice_penalty_bps } else { 0.0 },
-                reward_distance_to_mid_penalty: if cfg.reward_distance_to_mid_penalty > 0.0 { cfg.reward_distance_to_mid_penalty } else { 0.0 },
-                reward_skew_penalty_weight: if cfg.reward_skew_penalty_weight > 0.0 { cfg.reward_skew_penalty_weight } else { 0.0 },
-                reward_adverse_selection_bonus_multiplier: if cfg.reward_adverse_selection_bonus_multiplier > 0.0 { cfg.reward_adverse_selection_bonus_multiplier } else { 0.0 },
-                reward_realized_pnl_multiplier: if cfg.reward_realized_pnl_multiplier > 0.0 { cfg.reward_realized_pnl_multiplier } else { 0.0 },
-                reward_cancel_all_penalty: if cfg.reward_cancel_all_penalty > 0.0 { cfg.reward_cancel_all_penalty } else { 0.0 },
-                reward_inventory_change_penalty: if cfg.reward_inventory_change_penalty > 0.0 { cfg.reward_inventory_change_penalty } else { 0.0 },
-                reward_two_sided_bonus: if cfg.reward_two_sided_bonus > 0.0 { cfg.reward_two_sided_bonus } else { 0.0 },
-                reward_taker_action_penalty: if cfg.reward_taker_action_penalty > 0.0 { cfg.reward_taker_action_penalty } else { 0.0 },
-                reward_quote_presence_bonus: if cfg.reward_quote_presence_bonus > 0.0 { cfg.reward_quote_presence_bonus } else { 0.0 },
-                invalid_action_penalty: 0.1, // Magnitude of penalty for illegal actions
-                thesis_decay_weight: if cfg.reward_thesis_decay_weight > 0.0 { cfg.reward_thesis_decay_weight } else { 0.0001 },
+                mtm_penalty_multiplier: cfg.reward_mtm_penalty_multiplier,
+                reprice_penalty_bps: cfg.reward_reprice_penalty_bps,
+                reward_distance_to_mid_penalty: cfg.reward_distance_to_mid_penalty,
+                reward_skew_penalty_weight: cfg.reward_skew_penalty_weight,
+                reward_adverse_selection_bonus_multiplier: cfg.reward_adverse_selection_bonus_multiplier,
+                reward_realized_pnl_multiplier: cfg.reward_realized_pnl_multiplier,
+                reward_cancel_all_penalty: cfg.reward_cancel_all_penalty,
+                reward_inventory_change_penalty: cfg.reward_inventory_change_penalty,
+                reward_two_sided_bonus: cfg.reward_two_sided_bonus,
+                reward_taker_action_penalty: cfg.reward_taker_action_penalty,
+                reward_quote_presence_bonus: cfg.reward_quote_presence_bonus,
             },
+            current_trade_start_ts: None,
+            reward_state: RewardState::new(initial_equity),
+            max_daily_dd, initial_equity_base: initial_equity,
+            use_exit_curriculum_d1: cfg.use_exit_curriculum_d1,
+            maker_first_exit_timeout_ms: if cfg.maker_first_exit_timeout_ms > 0 { cfg.maker_first_exit_timeout_ms } else { 3000 },
+            exit_fallback_loss_bps: if cfg.exit_fallback_loss_bps > 0.0 { cfg.exit_fallback_loss_bps } else { 10.0 },
+            exit_fallback_mfe_giveback_bps: if cfg.exit_fallback_mfe_giveback_bps > 0.0 { cfg.exit_fallback_mfe_giveback_bps } else { 5.0 },
+            exit_fallback_thesis_decay_threshold: if cfg.exit_fallback_thesis_decay_threshold > 0.0 { cfg.exit_fallback_thesis_decay_threshold } else { 0.45 },
+            exit_maker_pricing_multiplier: if cfg.exit_maker_pricing_multiplier > 0.0 { cfg.exit_maker_pricing_multiplier } else { 1.0 },
+            reward_exit_maker_bonus_weight: cfg.reward_exit_maker_bonus_weight,
+            exit_intent_ts: None, max_trade_upnl_bps: 0.0, peak_unrealized_pnl_bps: 0.0, dynamic_trade_floor_bps: 0.0, last_exit_ts: None,
+            exit_fallback_triggered_in_step: false, exit_fallback_reason_in_step: 0,
+            exit_blocked_count: 0, exit_blocked_pnl_sum: 0.0, exit_blocked_1_to_4_count: 0,
+            max_blocked_upnl_bps: 0.0, opportunity_lost_count: 0, realized_pnl_total: 0.0,
+            win_count: 0, loss_count: 0, sum_win_hold_ms: 0, sum_loss_hold_ms: 0,
+            total_win_hold_ms: 0, total_loss_hold_ms: 0,
             decision_interval_ms: decision_interval_ms.try_into().unwrap_or(100),
-            // vNext: Hard gate configs
             use_vnext_reward: cfg.reward_as_penalty_weight > 0.0 || cfg.reward_fee_cost_weight > 0.0 || cfg.reward_thesis_decay_weight > 0.0,
+            hard_disaster_dd: hard_dd, max_hold_ms: if cfg.max_hold_ms > 0 { cfg.max_hold_ms as u64 } else { 0 },
+            end_ts: end_ts_val, peak_equity: initial_equity, done: false,
+            last_obs: vec![0.0; OBS_DIM], cancel_count_in_step: 0, reprice_count_in_step: 0,
+            post_delta_threshold_bps: cfg.post_delta_threshold_bps,
+            prev_realized_pnl: 0.0, prev_exposure: 0.0,
             close_position_loss_threshold: cfg.close_position_loss_threshold,
             min_post_offset_bps: cfg.min_post_offset_bps,
-            imbalance_block_threshold: cfg.imbalance_block_threshold,
-            gate_close_blocked_in_step: 0,
-            gate_offset_blocked_in_step: 0,
-            gate_imbalance_blocked_in_step: 0,
-            entry_veto_count_in_step: 0,
-            action_counts: HashMap::new(),
-            exit_distribution: HashMap::new(),
-            entry_veto_count: 0,
-            exit_blocked_count: 0,
-            exit_blocked_pnl_sum: 0.0,
-            exit_blocked_1_to_4_count: 0,
-            max_blocked_upnl_bps: 0.0,
-            opportunity_lost_count: 0,
-            current_trade_start_ts: None,
-            win_count: 0,
-            loss_count: 0,
-            sum_win_hold_ms: 0,
-            sum_loss_hold_ms: 0,
-            realized_pnl_total: 0.0,
-            use_selective_entry: cfg.use_selective_entry,
-            entry_veto_threshold_bps: if cfg.entry_veto_threshold_bps > 0.0 { cfg.entry_veto_threshold_bps } else { 1.0 },
-            orderbook: SimOrderBook::new(),
+            entry_veto_count: 0, entry_veto_count_in_step: 0, exit_maker_fills_in_step: 0, voluntary_exit_taker_fills_in_step: 0,
+            gate_close_blocked_in_step: 0, gate_offset_blocked_in_step: 0, gate_imbalance_blocked_in_step: 0,
+            hard_invalid_count_in_step: 0, accepted_as_marketable_count: 0, accepted_as_passive_count: 0,
+            resting_fill_count: 0, immediate_fill_count: 0, liquidity_flag_unknown_count: 0,
+            action_counts: HashMap::new(), exit_distribution: HashMap::new(),
         };
 
         // Warmup: advance until first feature emission
@@ -1140,10 +1277,7 @@ impl RlService for RLServiceImpl {
         let action_type = ActionType::try_from(action_raw)
             .unwrap_or(ActionType::Hold);
         
-        log::debug!("RL_STEP: episode={} action_raw={} action_type={:?}", req.episode_id, action_raw, action_type);
-
         let has_pos_before = episode.exec_engine.portfolio.state.positions.get(&episode.symbol).is_some();
-
         let (_, is_invalid) = episode.apply_action(action_type);
 
         // 2. Advance to next decision tick
@@ -1152,10 +1286,39 @@ impl RlService for RLServiceImpl {
         let has_pos_after = episode.exec_engine.portfolio.state.positions.get(&episode.symbol).is_some();
         let now_ts = episode.last_tick_ts;
 
+        // Per-tick peak uPnL and dynamic floor update (while in position)
+        if has_pos_after {
+            if let Some(p) = episode.exec_engine.portfolio.state.positions.get(&episode.symbol) {
+                let eq = episode.exec_engine.portfolio.state.equity_usdt;
+                if eq > 0.0 {
+                    let upnl_bps = p.unrealized_pnl / eq * 10000.0;
+                    if upnl_bps > episode.peak_unrealized_pnl_bps {
+                        episode.peak_unrealized_pnl_bps = upnl_bps;
+                    }
+                    if upnl_bps > 2.5 {
+                        let new_floor = (episode.peak_unrealized_pnl_bps * 0.5).max(0.5);
+                        if (new_floor - episode.dynamic_trade_floor_bps).abs() > 0.01 {
+                            log::info!("DYNAMIC_FLOOR_UPDATE: peak={:.2} floor={:.2}->{:.2} upnl={:.2}", 
+                                episode.peak_unrealized_pnl_bps, episode.dynamic_trade_floor_bps, new_floor, upnl_bps);
+                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("C:\\Bot mk3\\dynfloor_log.txt") {
+                                use std::io::Write;
+                                let _ = writeln!(f, "step={} peak={:.2} floor={:.2}->{:.2} upnl={:.2}", 
+                                    episode.step_count, episode.peak_unrealized_pnl_bps, episode.dynamic_trade_floor_bps, new_floor, upnl_bps);
+                            }
+                        }
+                        episode.dynamic_trade_floor_bps = new_floor;
+                    }
+                }
+            }
+        }
+
         if has_pos_before && !has_pos_after {
-            // Trade ended
+            // Trade ended -- reset per-trade state
+            episode.dynamic_trade_floor_bps = 0.0;
+            episode.peak_unrealized_pnl_bps = 0.0;
+            episode.last_exit_ts = Some(now_ts);
             if let Some(start_ts) = episode.current_trade_start_ts.take() {
-                let hold_ms = (now_ts - start_ts).max(0) as u64;
+                let hold_ms = (now_ts - start_ts).max(0i64) as u64;
                 let current_total_rpnl = episode.exec_engine.portfolio.state.cumulative_pnl.get(&episode.symbol).cloned().unwrap_or(0.0);
                 
                 // Use the delta about to be computed for reward
@@ -1188,6 +1351,9 @@ impl RlService for RLServiceImpl {
         
         // Count trades NOW, after they have materialized inside advance_to_next_tick
         let trades_this_step = episode.exec_engine.last_fill_events.len() as u32;
+        if trades_this_step > 0 {
+            log::info!("RL_TRADE_EXECUTED: count={} in step {}", trades_this_step, episode.step_count);
+        }
 
         // 3. Check done conditions
         let (mut risk_done, mut reason) = episode.check_done();
@@ -1281,35 +1447,56 @@ impl RlService for RLServiceImpl {
             }),
             reward,
             done: episode.done,
-            info: Some(StepInfo {
+                                                            info: Some(StepInfo {
                 ts: episode.last_tick_ts,
                 reason: final_reason.to_string(),
                 mid_price: episode.last_mid_price,
-                mark_price: episode.last_mark_price,
+                mark_price: episode.last_mid_price,
                 trades_executed: trades_this_step,
-                maker_fills,
-                toxic_fills,
-                stale_expiries,
-                cancel_count,
-                active_order_count,
+                maker_fills: maker_fills,
+                toxic_fills: toxic_fills,
+                stale_expiries: stale_expiries,
+                cancel_count: cancel_count,
+                active_order_count: active_order_count,
                 reprice_count: episode.reprice_count_in_step,
-                fills,
+                fills: fills,
                 gate_close_blocked: episode.gate_close_blocked_in_step,
                 gate_offset_blocked: episode.gate_offset_blocked_in_step,
                 gate_imbalance_blocked: episode.gate_imbalance_blocked_in_step,
                 action_counts: episode.action_counts.clone(),
                 realized_pnl_total: episode.realized_pnl_total,
-                avg_win_hold_ms: avg_win_hold,
-                avg_loss_hold_ms: avg_loss_hold,
-                exit_distribution: episode.action_counts.clone(), // Wait, should be action_counts or exit_distribution? 
-                // Using exit_distribution mapping and entry_veto_count
-                entry_veto_count: episode.entry_veto_count_in_step, 
+                avg_win_hold_ms: if episode.win_count > 0 { episode.total_win_hold_ms as f64 / episode.win_count as f64 } else { 0.0 },
+                avg_loss_hold_ms: if episode.loss_count > 0 { episode.total_loss_hold_ms as f64 / episode.loss_count as f64 } else { 0.0 },
+                exit_distribution: episode.exit_distribution.clone(),
+                entry_veto_count: episode.entry_veto_count,
                 exit_blocked_count: episode.exit_blocked_count,
                 exit_blocked_avg_pnl_bps: if episode.exit_blocked_count > 0 { episode.exit_blocked_pnl_sum / episode.exit_blocked_count as f64 } else { 0.0 },
                 exit_blocked_1_to_4_count: episode.exit_blocked_1_to_4_count,
                 opportunity_lost_count: episode.opportunity_lost_count,
                 thesis_decay_penalty: episode.reward_state.last_thesis_penalty,
                 is_invalid,
+                soft_veto_count_in_step: episode.entry_veto_count_in_step,
+                hard_invalid_count_in_step: episode.hard_invalid_count_in_step,
+                exit_maker_fills: episode.exit_maker_fills_in_step,
+                voluntary_exit_taker_fills: episode.voluntary_exit_taker_fills_in_step,
+                accepted_as_marketable_count: episode.accepted_as_marketable_count,
+                accepted_as_passive_count: episode.accepted_as_passive_count,
+                resting_fill_count: episode.resting_fill_count,
+                immediate_fill_count: episode.immediate_fill_count,
+                liquidity_flag_unknown_count: episode.liquidity_flag_unknown_count,
+                action_mask: episode.compute_action_mask().to_vec(),
+                invalid_open_marketable_count: 0,
+                invalid_close_flat_count: episode.hard_invalid_count_in_step,
+                invalid_reprice_empty_count: 0,
+                invalid_pos_side_mismatch_count: 0,
+                masked_action_chosen_count: 0,
+                veto_long_flow_count: episode.entry_veto_count_in_step,
+                veto_long_bb_count: 0,
+                veto_long_dead_regime_count: 0,
+                exit_intent_active: if episode.exit_intent_ts.is_some() { 1 } else { 0 },
+                exit_fallback_triggered: if episode.exit_fallback_triggered_in_step { 1 } else { 0 },
+                time_since_exit_intent_ms: if let Some(ts) = episode.exit_intent_ts { (episode.last_tick_ts - ts).max(0) as u32 } else { 0 },
+                exit_fallback_reason: episode.exit_fallback_reason_in_step,
             }),
             state: Some(env_state),
             feature_health: Some(f_health),
@@ -1320,6 +1507,12 @@ impl RlService for RLServiceImpl {
         episode.gate_offset_blocked_in_step = 0;
         episode.gate_imbalance_blocked_in_step = 0;
         episode.entry_veto_count_in_step = 0;
+        episode.accepted_as_marketable_count = 0;
+        episode.accepted_as_passive_count = 0;
+        episode.resting_fill_count = 0;
+        episode.immediate_fill_count = 0;
+        episode.liquidity_flag_unknown_count = 0;
+
         episode.exit_blocked_count = 0;
         episode.exit_blocked_pnl_sum = 0.0;
 

@@ -2,67 +2,91 @@ use super::buffers::{EmaState, RsiState, BollingerState, CandleBuilder};
 
 /// State for Group F: Slow technical indicators (for gating, not HFT).
 /// Computed from selected timeframe closes (e.g. 1s or 1m).
+/// State for Group F: Slow technical indicators (for gating/alpha).
+/// Computed from selected timeframe closes (e.g. 1m, 5m, 15m).
+#[derive(Debug, Clone)]
+pub struct HorizonState {
+    pub rsi14: RsiState,
+    pub bb20: BollingerState,
+    pub builder: CandleBuilder,
+}
+
+impl HorizonState {
+    pub fn new(period_ms: i64) -> Self {
+        Self {
+            rsi14: RsiState::new(14),
+            bb20: BollingerState::new(20, 2.0),
+            builder: CandleBuilder::new(period_ms),
+        }
+    }
+
+    pub fn update(&mut self, ts: i64, price: f64) -> bool {
+        if let Some(closed_price) = self.builder.update(ts, price) {
+            self.rsi14.update(closed_price);
+            self.bb20.update(closed_price);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn candle_count(&self) -> usize {
+        self.rsi14.count()
+    }
+}
+
+/// State for Group F: Slow technical indicators (for gating/alpha).
 #[derive(Debug, Clone)]
 pub struct TechState {
-    ema200: EmaState,
-    rsi14: RsiState,
-    bb20: BollingerState, // 20-period BB with 2σ
-    candle_builder: Option<CandleBuilder>,
+    pub h1m: HorizonState,
+    pub h5m: HorizonState,
+    pub h15m: HorizonState,
+    pub ema200_1m: EmaState, // Legacy/Critical 200-period EMA on 1m
 }
 
 impl TechState {
-    pub fn new(slow_tf: &str) -> Self {
-        let candle_builder = if slow_tf == "1m" {
-            Some(CandleBuilder::new(60_000))
-        } else if slow_tf == "1s" {
-            Some(CandleBuilder::new(1000))
-        } else {
-            None
-        };
-
+    pub fn new() -> Self {
         Self {
-            ema200: EmaState::new(200),
-            rsi14: RsiState::new(14),
-            bb20: BollingerState::new(20, 2.0),
-            candle_builder,
+            h1m: HorizonState::new(60_000),
+            h5m: HorizonState::new(300_000),
+            h15m: HorizonState::new(900_000),
+            ema200_1m: EmaState::new(200),
         }
     }
 
-    /// Update all technical indicators. If slow_tf == "1m", only updates on 1m close boundaries.
     pub fn update(&mut self, ts: i64, mid_price: f64) {
-        if let Some(builder) = &mut self.candle_builder {
-            if let Some(closed_price) = builder.update(ts, mid_price) {
-                self.ema200.update(closed_price);
-                self.rsi14.update(closed_price);
-                self.bb20.update(closed_price);
+        if self.h1m.update(ts, mid_price) {
+            if let Some(c) = self.h1m.builder.current_candle_start {
+                // Update EMA on 1m close
+                self.ema200_1m.update(mid_price);
             }
-        } else {
-            self.ema200.update(mid_price);
-            self.rsi14.update(mid_price);
-            self.bb20.update(mid_price);
         }
+        self.h5m.update(ts, mid_price);
+        self.h15m.update(ts, mid_price);
     }
 
-    /// Compute technical features.
     pub fn compute(&self, mid_price: f64) -> TechFeatures {
-        let ema200_distance_pct = if self.ema200.is_ready() {
-            self.ema200.get().map(|ema| {
+        let ema200_distance_pct = if self.ema200_1m.is_ready() {
+            self.ema200_1m.get().map(|ema| {
                 if ema > 0.0 { (mid_price - ema) / ema * 100.0 } else { 0.0 }
             })
         } else {
             None
         };
 
-        let rsi_14 = self.rsi14.get();
-
-        let bb_width = if self.bb20.is_ready() { self.bb20.width() } else { None };
-        let bb_pos = if self.bb20.is_ready() { self.bb20.position(mid_price) } else { None };
-
         TechFeatures {
             ema200_distance_pct,
-            rsi_14,
-            bb_width,
-            bb_pos,
+            rsi_1m: self.h1m.rsi14.get(),
+            bb_width_1m: self.h1m.bb20.width(),
+            bb_pos_1m: self.h1m.bb20.position(mid_price),
+            
+            rsi_5m: self.h5m.rsi14.get(),
+            bb_width_5m: self.h5m.bb20.width(),
+            bb_pos_5m: self.h5m.bb20.position(mid_price),
+            
+            rsi_15m: self.h15m.rsi14.get(),
+            bb_width_15m: self.h15m.bb20.width(),
+            bb_pos_15m: self.h15m.bb20.position(mid_price),
         }
     }
 }
@@ -70,9 +94,15 @@ impl TechState {
 #[derive(Debug, Clone)]
 pub struct TechFeatures {
     pub ema200_distance_pct: Option<f64>,
-    pub rsi_14: Option<f64>,
-    pub bb_width: Option<f64>,
-    pub bb_pos: Option<f64>,
+    pub rsi_1m: Option<f64>,
+    pub bb_width_1m: Option<f64>,
+    pub bb_pos_1m: Option<f64>,
+    pub rsi_5m: Option<f64>,
+    pub bb_width_5m: Option<f64>,
+    pub bb_pos_5m: Option<f64>,
+    pub rsi_15m: Option<f64>,
+    pub bb_width_15m: Option<f64>,
+    pub bb_pos_15m: Option<f64>,
 }
 
 #[cfg(test)]
@@ -80,45 +110,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tech_state_1s() {
-        let mut tech = TechState::new("1s");
+    fn test_tech_state_multi_horizon() {
+        let mut tech = TechState::new();
         
-        // Feed 30 data points exactly 1 second apart
-        for i in 1..=30 {
+        // Feed 1 minute (60s) of data
+        for i in 1..=60 {
             tech.update(i * 1000, 100.0 + (i as f64));
         }
         
-        // For a 20-period bollinger band, we need 20 inputs. Since we feed 1 per second in "1s" mode,
-        // it should definitely be ready after 30 seconds.
-        let f = tech.compute(130.0);
-        assert!(f.bb_width.is_some(), "BB should be ready after 20 inputs in 1s mode");
-    }
+        let f1 = tech.compute(160.0);
+        // After 1 minute, 1 candle has closed for h1m. 
+        // Bollinger needs 20 candles.
+        assert!(f1.bb_width_1m.is_none(), "1m BB should not be ready after 1 minute");
 
-    #[test]
-    fn test_tech_state_1m() {
-        let mut tech = TechState::new("1m");
-        
-        // Feed 59 data points exactly 1 second apart
-        for i in 1..=59 {
+        // Feed 21 minutes of data
+        for i in 61..=(21 * 60) {
             tech.update(i * 1000, 100.0 + (i as f64));
         }
-        
-        // In "1m" mode, 59 seconds is still inside the first candle [0, 60_000).
-        // It hasn't closed yet! No BB state should exist.
-        let f1 = tech.compute(159.0);
-        assert!(f1.bb_width.is_none(), "BB should not be ready, 0 candles have closed");
 
-        // Now cross the 1-minute boundary (t=60000 starts the [60k, 120k) candle)
-        // This closes the first candle with close price = 159.0
-        tech.update(60_000, 200.0);
+        let f2 = tech.compute(100.0 + (21.0 * 60.0));
+        assert!(f2.bb_width_1m.is_some(), "1m BB should be ready after 20+ minutes");
+        assert!(f2.rsi_1m.is_some(), "1m RSI should be ready after 14+ minutes");
         
-        // We now have exactly ONE candle closed.
-        // BB needs 20 candles! Let's just push 20 minutes worth of data.
-        for min in 1..=21 {
-            tech.update(min * 60_000, 100.0 + (min as f64));
-        }
-
-        let f2 = tech.compute(121.0);
-        assert!(f2.bb_width.is_some(), "BB should be ready after >20 minutes in 1m mode");
+        // h5m needs 20 * 5 = 100 minutes
+        assert!(f2.bb_width_5m.is_none(), "5m BB should not be ready after 21 minutes");
     }
 }

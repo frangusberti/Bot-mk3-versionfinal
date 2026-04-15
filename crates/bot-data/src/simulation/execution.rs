@@ -238,7 +238,9 @@ impl ExecutionEngine {
                 if order.status == OrderStatus::New { order.status = OrderStatus::Penned; }
                 return None;
             }
-            if order.status == OrderStatus::Penned || order.status == OrderStatus::New { order.status = OrderStatus::Open; }
+            if order.status == OrderStatus::Penned || order.status == OrderStatus::New { 
+                order.status = OrderStatus::Open; 
+            }
             
             // Timeout Check
             if let Some(exp) = order.expires_ts {
@@ -416,15 +418,17 @@ impl ExecutionEngine {
                  };
                  
                  // Determine if order was providing liquidity (Maker) or taking it (Taker)
-                 let is_taker = if order.order_type == OrderType::Market {
-                     true
-                 } else {
-                     // If Limit Buy Price >= Best Ask, it is Taker (crossed the spread).
-                     match order.side {
-                         Side::Buy => if let Some(ask) = event.best_ask { order.price >= ask } else { event.price.map(|p| order.price >= p).unwrap_or(false) },
-                         Side::Sell => if let Some(bid) = event.best_bid { order.price <= bid } else { event.price.map(|p| order.price <= p).unwrap_or(false) },
-                     }
-                 };
+                 let is_taker = order.was_marketable_on_arrival || 
+                                order.resting_since_ts.map_or(true, |ts| event.time_canonical < ts);
+                 
+                 let mut final_liquidity_flag = if is_taker { LiquidityFlag::Taker } else { LiquidityFlag::Maker };
+                 
+                 if !order.accepted_as_passive && !order.was_marketable_on_arrival {
+                     final_liquidity_flag = LiquidityFlag::Unknown;
+                 }
+                 
+                 let fee_rate = match final_liquidity_flag { LiquidityFlag::Maker => self.config.maker_fee_bps, _ => self.config.taker_fee_bps };
+                 let liq_str = match final_liquidity_flag { LiquidityFlag::Maker => "Maker", LiquidityFlag::Taker => "Taker", LiquidityFlag::Unknown => "Unknown" }.to_string();
                  
                   // Apply slippage
                   match &self.config.slippage_model {
@@ -436,7 +440,6 @@ impl ExecutionEngine {
                                   fill_price = vwap;
                                   let mid = Self::get_price_for_pnl(event).unwrap_or(fill_price);
                                   let slip_bps = if mid > 0.0 { ((fill_price - mid) / mid * 10000.0).abs() } else { 0.0 };
-                                  let fee_rate = if is_taker { self.config.taker_fee_bps } else { self.config.maker_fee_bps };
                                   let fee = (fill_price * filled_qty) * (fee_rate / 10000.0);
 
                                   if filled_qty < order.remaining {
@@ -451,13 +454,13 @@ impl ExecutionEngine {
                                           qty_filled: filled_qty,
                                           price: fill_price,
                                           fee_paid: fee,
-                                          liquidity_flag: if is_taker { LiquidityFlag::Taker } else { LiquidityFlag::Maker },
+                                          liquidity_flag: final_liquidity_flag,
                                           slippage_bps: slip_bps,
                                           event_time: event.time_canonical,
                                           cost_source: CostSource::Simulated,
                                           is_toxic: false,
                                       });
-                                      fill_info = Some((order.symbol.clone(), order.side, filled_qty, fill_price, fee, event.time_canonical, order.order_type, slip_bps, if is_taker { "Taker".to_string() } else { "Maker".to_string() }));
+                                      fill_info = Some((order.symbol.clone(), order.side, filled_qty, fill_price, fee, event.time_canonical, order.order_type, slip_bps, liq_str.clone()));
                                   } else {
                                       // Full fill from L2
                                       order.remaining = 0.0;
@@ -470,13 +473,13 @@ impl ExecutionEngine {
                                           qty_filled: filled_qty,
                                           price: fill_price,
                                           fee_paid: fee,
-                                          liquidity_flag: if is_taker { LiquidityFlag::Taker } else { LiquidityFlag::Maker },
+                                          liquidity_flag: final_liquidity_flag,
                                           slippage_bps: slip_bps,
                                           event_time: event.time_canonical,
                                           cost_source: CostSource::Simulated,
                                           is_toxic: false,
                                       });
-                                      fill_info = Some((order.symbol.clone(), order.side, filled_qty, fill_price, fee, event.time_canonical, order.order_type, slip_bps, if is_taker { "Taker".to_string() } else { "Maker".to_string() }));
+                                      fill_info = Some((order.symbol.clone(), order.side, filled_qty, fill_price, fee, event.time_canonical, order.order_type, slip_bps, liq_str.clone()));
                                   }
                               }
                           } else {
@@ -484,7 +487,6 @@ impl ExecutionEngine {
                               let slip = fill_price * (self.config.slip_bps / 10000.0);
                               if order.side == Side::Buy { fill_price += slip; } else { fill_price -= slip; }
                               
-                              let fee_rate = if is_taker { self.config.taker_fee_bps } else { self.config.maker_fee_bps };
                               let fee = (fill_price * order.qty) * (fee_rate / 10000.0);
                               let mid = Self::get_price_for_pnl(event).unwrap_or(fill_price);
                               let slip_bps = if mid > 0.0 { ((fill_price - mid) / mid * 10000.0).abs() } else { 0.0 };
@@ -499,20 +501,19 @@ impl ExecutionEngine {
                                   qty_filled: order.qty,
                                   price: fill_price,
                                   fee_paid: fee,
-                                  liquidity_flag: if is_taker { LiquidityFlag::Taker } else { LiquidityFlag::Maker },
+                                  liquidity_flag: final_liquidity_flag,
                                   slippage_bps: slip_bps,
                                   event_time: event.time_canonical,
                                   cost_source: CostSource::Simulated,
                                   is_toxic: false,
                               });
-                              fill_info = Some((order.symbol.clone(), order.side, order.qty, fill_price, fee, event.time_canonical, order.order_type, slip_bps, if is_taker { "Taker".to_string() } else { "Maker".to_string() }));
+                              fill_info = Some((order.symbol.clone(), order.side, order.qty, fill_price, fee, event.time_canonical, order.order_type, slip_bps, liq_str.clone()));
                           }
                       },
                       SlippageModel::Flat(bps) => {
                           let slip = fill_price * (bps / 10000.0);
                           if order.side == Side::Buy { fill_price += slip; } else { fill_price -= slip; }
                           
-                          let fee_rate = if is_taker { self.config.taker_fee_bps } else { self.config.maker_fee_bps };
                           let fee = (fill_price * order.qty) * (fee_rate / 10000.0);
                           let mid = Self::get_price_for_pnl(event).unwrap_or(fill_price);
                           let slip_bps = if mid > 0.0 { ((fill_price - mid) / mid * 10000.0).abs() } else { 0.0 };
@@ -527,13 +528,13 @@ impl ExecutionEngine {
                               qty_filled: order.qty,
                               price: fill_price,
                               fee_paid: fee,
-                              liquidity_flag: if is_taker { LiquidityFlag::Taker } else { LiquidityFlag::Maker },
+                              liquidity_flag: final_liquidity_flag,
                               slippage_bps: slip_bps,
                               event_time: event.time_canonical,
                               cost_source: CostSource::Simulated,
                               is_toxic: false,
                           });
-                          fill_info = Some((order.symbol.clone(), order.side, order.qty, fill_price, fee, event.time_canonical, order.order_type, slip_bps, if is_taker { "Taker".to_string() } else { "Maker".to_string() }));
+                          fill_info = Some((order.symbol.clone(), order.side, order.qty, fill_price, fee, event.time_canonical, order.order_type, slip_bps, liq_str.clone()));
                       },
                       SlippageModel::ConservativeMaker(_) => {
                           // Taker orders bypass queue logic and assume Flat(1bps) for simplicity
@@ -546,7 +547,6 @@ impl ExecutionEngine {
                                   if order.side == Side::Buy { fill_price += slip; } else { fill_price -= slip; }
                               }
                               
-                              let fee_rate = if is_taker { self.config.taker_fee_bps } else { self.config.maker_fee_bps };
                               let fee = (fill_price * filled) * (fee_rate / 10000.0);
                               let mid = Self::get_price_for_pnl(event).unwrap_or(fill_price);
                               let slip_bps = if mid > 0.0 { ((fill_price - mid) / mid * 10000.0).abs() } else { 0.0 };
@@ -567,13 +567,13 @@ impl ExecutionEngine {
                                   qty_filled: filled,
                                   price: fill_price,
                                   fee_paid: fee,
-                                  liquidity_flag: if is_taker { LiquidityFlag::Taker } else { LiquidityFlag::Maker },
+                                  liquidity_flag: final_liquidity_flag,
                                   slippage_bps: slip_bps,
                                   event_time: event.time_canonical,
                                   cost_source: CostSource::Simulated,
                                   is_toxic,
                               });
-                              fill_info = Some((order.symbol.clone(), order.side, filled, fill_price, fee, event.time_canonical, order.order_type, slip_bps, if is_taker { "Taker".to_string() } else { "Maker".to_string() }));
+                              fill_info = Some((order.symbol.clone(), order.side, filled, fill_price, fee, event.time_canonical, order.order_type, slip_bps, liq_str.clone()));
                           }
                       }
                   }
@@ -636,6 +636,31 @@ impl ExecutionEngine {
         self.order_counter += 1;
         let id = format!("ord_{}", self.order_counter);
         
+        let mut was_marketable = false;
+        let mut has_bbo = false;
+        if order_type == OrderType::Market {
+            was_marketable = true;
+            has_bbo = true;
+        } else {
+            match side {
+                Side::Buy => {
+                    if let Some(ask) = self.book_asks.first() {
+                        has_bbo = true;
+                        was_marketable = px >= ask.0;
+                    }
+                },
+                Side::Sell => {
+                    if let Some(bid) = self.book_bids.first() {
+                        has_bbo = true;
+                        was_marketable = px <= bid.0;
+                    }
+                }
+            }
+        }
+        
+        // If we don't have BBO (e.g. trade-only dataset), we assume it's passive if Limit
+        let accepted_as_passive = (!was_marketable && order_type == OrderType::Limit) || (!has_bbo && order_type == OrderType::Limit);
+        
         let now = self.current_time;
         
         let order = OrderState {
@@ -652,6 +677,9 @@ impl ExecutionEngine {
             pending_cancel_ts: 0,
             expires_ts: None,
             queue_state: None,
+            was_marketable_on_arrival: was_marketable,
+            accepted_as_passive,
+            resting_since_ts: if accepted_as_passive { Some(now + self.config.latency_ms) } else { None },
         };
         
         self.portfolio.state.active_orders.insert(id.clone(), order);

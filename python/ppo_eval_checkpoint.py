@@ -98,6 +98,18 @@ def run_ppo_audit(model_path, venv_path, dataset_id, steps_per_eval=5000, server
     close_with_pos = 0
     close_flat = 0
     exit_coincident_with_decay = 0
+    total_soft_vetoes = 0
+    total_hard_invalid = 0
+    total_accepted_as_marketable = 0
+    total_accepted_as_passive = 0
+    total_resting_fills = 0
+    total_immediate_fills = 0
+    total_unknown_fills = 0
+    total_invalid_open_marketable = 0
+    total_invalid_close_flat = 0
+    total_invalid_reprice_empty = 0
+    total_invalid_pos_side_mismatch = 0
+    total_masked_action_count = 0
     
     for _ in range(steps_per_eval):
         with torch.no_grad():
@@ -117,6 +129,18 @@ def run_ppo_audit(model_path, venv_path, dataset_id, steps_per_eval=5000, server
         # Invalid Action Tracking
         if info0.get("is_invalid", False):
             total_invalid_actions += 1
+        total_soft_vetoes += info0.get("soft_veto_count", 0)
+        total_hard_invalid += info0.get("hard_invalid_count", 0)
+        total_accepted_as_marketable += info0.get("accepted_as_marketable_count", 0)
+        total_accepted_as_passive += info0.get("accepted_as_passive_count", 0)
+        total_resting_fills += info0.get("resting_fill_count", 0)
+        total_immediate_fills += info0.get("immediate_fill_count", 0)
+        total_unknown_fills += info0.get("liquidity_flag_unknown_count", 0)
+        total_invalid_open_marketable += info0.get("invalid_open_marketable", 0)
+        total_invalid_close_flat += info0.get("invalid_close_flat", 0)
+        total_invalid_reprice_empty += info0.get("invalid_reprice_empty", 0)
+        total_invalid_pos_side_mismatch += info0.get("invalid_pos_side_mismatch", 0)
+        total_masked_action_count += info0.get("masked_action_count", 0)
             
         # Analysis of CLOSE intent
         is_close_intent = (action in [4, 8]) # CLOSE_LONG or CLOSE_SHORT
@@ -298,6 +322,20 @@ def run_ppo_audit(model_path, venv_path, dataset_id, steps_per_eval=5000, server
             "offset": total_gate_offset_blocked, 
             "imbalance": total_gate_imbalance_blocked
         },
+        "marketability": {
+            "resting_fills": total_resting_fills,
+            "immediate_fills": total_immediate_fills,
+            "unknown_fills": total_unknown_fills,
+            "accepted_as_marketable": total_accepted_as_marketable,
+            "accepted_as_passive": total_accepted_as_passive,
+            "breakdown": {
+                "open_marketable": total_invalid_open_marketable,
+                "close_flat": total_invalid_close_flat,
+                "reprice_empty": total_invalid_reprice_empty,
+                "side_mismatch": total_invalid_pos_side_mismatch,
+                "masked_chosen": total_masked_action_count
+            }
+        },
         "total_trades": int(trades_count), # Using a counter for trades
         "lifecycle": {
             "action_counts": dict(final_action_counts),
@@ -306,6 +344,8 @@ def run_ppo_audit(model_path, venv_path, dataset_id, steps_per_eval=5000, server
             "avg_win_hold_ms": float(avg_win_hold_ms),
             "total_thesis_decay": float(total_thesis_decay),
             "total_invalid_actions": int(total_invalid_actions),
+            "total_soft_vetoes": int(total_soft_vetoes),
+            "total_hard_invalid": int(total_hard_invalid),
             "invalid_action_rate": float(total_invalid_actions / steps_per_eval * 100),
             "close_with_pos": int(close_with_pos),
             "close_flat": int(close_flat),

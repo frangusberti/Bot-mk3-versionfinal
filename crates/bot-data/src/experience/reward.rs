@@ -45,6 +45,14 @@ pub struct RewardConfig {
     pub invalid_action_penalty: f64,
     /// Weight for thesis decay penalty (microprice drift against position)
     pub thesis_decay_weight: f64,
+    /// Weight for trailing MFE penalty (giving back gains)
+    pub trailing_mfe_penalty_weight: f64,
+    /// Flag to use the consolidated strict economic variant (A/B testing)
+    pub reward_consolidated_variant: bool,
+    /// Weight for voluntary taker exit penalty
+    pub exit_taker_penalty_weight: f64,
+    /// Weight for maker exit bonus
+    pub exit_maker_bonus_weight: f64,
 
     // ── Legacy fields (kept at 0.0 for backward compat, not used by vNext) ──
     pub overtrading_penalty: f64,
@@ -79,6 +87,10 @@ impl Default for RewardConfig {
             realized_pnl_bonus_weight: 2.0,
             invalid_action_penalty: 0.1, // Fixed -0.1 penalty per bad action
             thesis_decay_weight: 0.0,    // Default to off
+            trailing_mfe_penalty_weight: 0.0,
+            reward_consolidated_variant: false, // Default to legacy/A variant
+            exit_taker_penalty_weight: 0.0,
+            exit_maker_bonus_weight: 0.0,
 
             // Legacy — all zeroed
             overtrading_penalty: 0.0,
@@ -132,6 +144,10 @@ impl RewardCalculator {
         is_invalid_action: bool,
         micro_minus_mid_bps: f64,
         trade_imbalance_5s: f64,
+        max_trade_upnl_bps: f64,
+        current_upnl_bps: f64,
+        num_exit_maker_fills: u32,
+        num_voluntary_exit_taker_fills: u32,
         config: &RewardConfig,
     ) -> f64 {
         // Validation
@@ -221,6 +237,18 @@ impl RewardCalculator {
         let thesis_penalty = config.thesis_decay_weight * thesis_decay;
         state.last_thesis_penalty = thesis_penalty;
 
+        // ── Term 9: Trailing MFE Penalty ──
+        // Penalize the agent for giving back profit. 
+        // If max_trade_upnl_bps = 10 and current_upnl_bps = 5, we have 5bps of decay.
+        let mfe_decay = (max_trade_upnl_bps - current_upnl_bps).max(0.0);
+        let mfe_penalty = config.trailing_mfe_penalty_weight * mfe_decay;
+        
+        // ── Term 10: Exit Shaping (Consolidated) ──
+        // Penalize voluntary taker exits and reward maker exits.
+        // These are unit-less weights applied per fill event.
+        let exit_shaping = (config.exit_maker_bonus_weight * num_exit_maker_fills as f64)
+                         - (config.exit_taker_penalty_weight * num_voluntary_exit_taker_fills as f64);
+
         // ── Update state ──
         if current_equity > state.peak_equity {
             state.peak_equity = current_equity;
@@ -228,14 +256,24 @@ impl RewardCalculator {
         state.prev_equity = current_equity;
 
         // ── Combine: 7 terms (4 economic + 1 exploration + 1 surgical exit + 1 invalid penalty) ──
-        let reward = log_return
+        let mut reward = log_return
             - fee_penalty
             + as_signal      // as_signal is already negative for adverse
             - inventory_penalty
             + exploration_bonus
             + realized_bonus
             - invalid_penalty
-            - thesis_penalty;
+            - thesis_penalty
+            - mfe_penalty
+            + exit_shaping;
+
+        if config.reward_consolidated_variant {
+            reward = log_return
+                + as_signal
+                - inventory_penalty
+                - thesis_penalty
+                - invalid_penalty;
+        }
 
         if !reward.is_finite() {
             return -1.0;

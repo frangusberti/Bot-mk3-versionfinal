@@ -380,6 +380,10 @@ impl RsiState {
         self.count >= self.period
     }
 
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
     pub fn get(&self) -> Option<f64> {
         if !self.is_ready() { return None; }
         if self.avg_loss == 0.0 {
@@ -414,6 +418,8 @@ impl BollingerState {
     }
 
     pub fn is_ready(&self) -> bool { self.buffer.is_full() }
+
+    pub fn count(&self) -> usize { self.buffer.len() }
 
     /// Returns (sma, upper, lower) or None if not ready.
     pub fn get_bands(&self) -> Option<(f64, f64, f64)> {

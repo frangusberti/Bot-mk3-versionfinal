@@ -10,6 +10,14 @@ pub struct WarmupTracker {
     pub has_trades: bool,
     /// Whether orderbook is in sync
     pub orderbook_in_sync: bool,
+
+    // --- ITR Horizons (Buffer Audit) ---
+    pub h1m_candles: usize,
+    pub h5m_candles: usize,
+    pub h15m_candles: usize,
+    pub mid_history_len: usize,
+    pub has_oi: bool,
+    pub has_shocks: bool,
 }
 
 impl WarmupTracker {
