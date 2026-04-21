@@ -16,6 +16,9 @@ use bot_data::normalization::schema::TimeMode;
 use bot_data::simulation::execution::ExecutionEngine;
 use bot_data::simulation::structs::{ExecutionConfig, Side, OrderType};
 use bot_data::normalization::schema::NormalizedMarketEvent;
+use crate::services::market::live::LiveMarketStream;
+use crate::telemetry::tracer::{PersistentTracer, DecisionLogEntry};
+use serde::{Serialize, Deserialize};
 use bot_data::experience::reward::{RewardCalculator, RewardState, RewardConfig};
 
 use tonic::{Request, Response, Status};
@@ -35,7 +38,7 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 
 // --- Constants ---
-const OBS_DIM: usize = 148;
+const OBS_DIM: usize = 166;  // FeatureRow::OBS_DIM (Schema v7)
 const ACTION_DIM: i32 = 10;
 
 const ACTION_LABELS: [&str; 10] = [
@@ -113,6 +116,46 @@ impl SimOrderBook {
     }
 }
 
+// --- Live Observer State ---
+#[derive(Debug, Clone, PartialEq)]
+pub enum LiveMode {
+    Observer,
+    Paper,
+    Shadow,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum LiveStatus {
+    Prewarm,
+    LiveReady,
+}
+
+pub struct LiveHandle {
+    pub mode: LiveMode,
+    pub status: LiveStatus,
+    pub prewarm_start_ts: Option<i64>,
+    pub ws_status: String,
+    pub last_mid: f64,
+    pub equity: f64,
+    pub features_valid_count: usize,
+    pub last_fallback: String,
+}
+
+impl LiveHandle {
+    pub fn new(mode: LiveMode) -> Self {
+        Self {
+            mode,
+            status: LiveStatus::Prewarm,
+            prewarm_start_ts: None,
+            ws_status: "CONNECTING".to_string(),
+            last_mid: 0.0,
+            equity: 50000.0,
+            features_valid_count: 0,
+            last_fallback: "NONE".to_string(),
+        }
+    }
+}
+
 // --- Episode Handle ---
 
 struct EpisodeHandle {
@@ -127,6 +170,16 @@ struct EpisodeHandle {
     use_selective_entry: bool,
     entry_veto_threshold_bps: f64,
     imbalance_block_threshold: f64,
+    // Long selective entry v2 (regime + BB + imbalance veto)
+    use_selective_entry_long_v2: bool,
+    long_veto_imbalance_threshold: f64,
+    long_veto_bb_pos_5m_threshold: f64,
+    long_veto_regime_dead_threshold: f64,
+    // Short selective entry v1 (symmetric veto)
+    use_selective_entry_short_v1: bool,
+    short_veto_imbalance_threshold: f64,
+    short_veto_bb_pos_5m_threshold: f64,
+    short_veto_regime_dead_threshold: f64,
     pub use_exit_curriculum_d1: bool,
     pub maker_first_exit_timeout_ms: u32,
     pub exit_fallback_loss_bps: f64,
@@ -505,6 +558,27 @@ impl EpisodeHandle {
                         return (0, true);
                     }
                 }
+                if self.use_selective_entry_long_v2 {
+                    let f = self.last_features.as_ref();
+                    let imbalance = f.and_then(|r| r.trade_imbalance_5s).unwrap_or(0.0);
+                    if imbalance < self.long_veto_imbalance_threshold {
+                        self.entry_veto_count_in_step += 1;
+                        self.entry_veto_count += 1;
+                        return (0, true);
+                    }
+                    let bb_pos = f.and_then(|r| r.bb_pos_5m).unwrap_or(0.5);
+                    if bb_pos >= self.long_veto_bb_pos_5m_threshold {
+                        self.entry_veto_count_in_step += 1;
+                        self.entry_veto_count += 1;
+                        return (0, true);
+                    }
+                    let regime_dead = f.and_then(|r| r.regime_dead).unwrap_or(0.0);
+                    if regime_dead >= self.long_veto_regime_dead_threshold {
+                        self.entry_veto_count_in_step += 1;
+                        self.entry_veto_count += 1;
+                        return (0, true);
+                    }
+                }
                 self.peak_unrealized_pnl_bps = 0.0;
                 self.dynamic_trade_floor_bps = 0.0;
                 (self.submit_passive_order(Side::Buy, target_qty, false), false)
@@ -550,6 +624,27 @@ impl EpisodeHandle {
                 if self.use_selective_entry {
                     let micro_diff = self.last_features.as_ref().and_then(|f| f.microprice_minus_mid_bps).unwrap_or(0.0);
                     if micro_diff > self.entry_veto_threshold_bps {
+                        self.entry_veto_count_in_step += 1;
+                        self.entry_veto_count += 1;
+                        return (0, true);
+                    }
+                }
+                if self.use_selective_entry_short_v1 {
+                    let f = self.last_features.as_ref();
+                    let imbalance = f.and_then(|r| r.trade_imbalance_5s).unwrap_or(0.0);
+                    if imbalance > self.short_veto_imbalance_threshold {
+                        self.entry_veto_count_in_step += 1;
+                        self.entry_veto_count += 1;
+                        return (0, true);
+                    }
+                    let bb_pos = f.and_then(|r| r.bb_pos_5m).unwrap_or(0.5);
+                    if bb_pos <= self.short_veto_bb_pos_5m_threshold {
+                        self.entry_veto_count_in_step += 1;
+                        self.entry_veto_count += 1;
+                        return (0, true);
+                    }
+                    let regime_dead = f.and_then(|r| r.regime_dead).unwrap_or(0.0);
+                    if regime_dead >= self.short_veto_regime_dead_threshold {
                         self.entry_veto_count_in_step += 1;
                         self.entry_veto_count += 1;
                         return (0, true);
@@ -942,13 +1037,17 @@ impl EpisodeHandle {
 pub struct RLServiceImpl {
     runs_dir: PathBuf,
     episodes: std::sync::RwLock<HashMap<String, Arc<TokioMutex<EpisodeHandle>>>>,
+    pub live_handle: Arc<TokioMutex<LiveHandle>>,
+    pub tracer: Arc<TokioMutex<PersistentTracer>>,
 }
 
 impl RLServiceImpl {
     pub fn new(runs_dir: PathBuf) -> Self {
         Self {
-            runs_dir,
+            runs_dir: runs_dir.clone(),
             episodes: std::sync::RwLock::new(HashMap::new()),
+            live_handle: Arc::new(TokioMutex::new(LiveHandle::new(LiveMode::Observer))),
+            tracer: Arc::new(TokioMutex::new(PersistentTracer::new(&runs_dir))),
         }
     }
 
@@ -981,6 +1080,108 @@ impl RLServiceImpl {
         None
     }
 
+
+    // --- Stage 1: Live Observer Engine ---
+    pub async fn run_live_observer(&self, symbol: String) -> Result<(), anyhow::Error> {
+        info!("STARTING LIVE OBSERVER: symbol={}", symbol);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1000);
+        let stream = LiveMarketStream::new(symbol.clone(), tx);
+        
+        // Spawn ingestion task
+        tokio::spawn(async move {
+            stream.run().await;
+        });
+
+        // Initialize features for live (10Hz / 100ms interval)
+        let mut feature_engine = FeatureEngineV2::new(FeatureEngineV2Config {
+            symbol: symbol.clone(),
+            interval_ms: 100, 
+            time_mode: TimeMode::RecvTimeAware, 
+            telemetry_enabled: true,
+            ..Default::default()
+        });
+
+        let mut ticker_timer = tokio::time::interval(tokio::time::Duration::from_secs(5));
+        let mut first_event_ts = None;
+
+        while let Some(event) = rx.recv().await {
+            // Update mid price and WS health in state
+            {
+                let mut lh = self.live_handle.lock().await;
+                if let (Some(b), Some(a)) = (event.best_bid, event.best_ask) {
+                    lh.last_mid = (b + a) / 2.0;
+                }
+                lh.ws_status = "OK".to_string(); 
+                if first_event_ts.is_none() {
+                    first_event_ts = Some(event.time_canonical);
+                    lh.prewarm_start_ts = first_event_ts;
+                }
+            }
+
+            // Hydrate Feature Engine and Trace Market
+            feature_engine.update(&event);
+            self.tracer.lock().await.log_market_event(&event);
+
+            // Ingest to feature engine
+            if let Some(features) = feature_engine.maybe_emit(event.time_canonical) {
+                let mut lh = self.live_handle.lock().await;
+                lh.features_valid_count = features.to_obs_vec().0.len() / 2;
+                
+                // Track prewarm (120 min = 7,200,000 ms)
+                let elapsed = event.time_canonical - lh.prewarm_start_ts.unwrap_or(event.time_canonical);
+                if elapsed > 7_200_000 && lh.status == LiveStatus::Prewarm {
+                    lh.status = LiveStatus::LiveReady;
+                    log::info!("!!! LIVE_READY: Prewarm complete ({}ms) !!!", elapsed);
+                }
+
+                // Log decision trace (Observer mode: action=none)
+                let mut tracer: tokio::sync::MutexGuard<'_, PersistentTracer> = self.tracer.lock().await;
+                tracer.log_decision(DecisionLogEntry {
+                    timestamp: event.time_canonical,
+                    mid_price: lh.last_mid,
+                    action: "NONE".to_string(),
+                    action_source: "none".to_string(),
+                    veto_type: None,
+                    features_summary: format!("F:{}", lh.features_valid_count),
+                    observation_full: None,
+                    health_ws: lh.ws_status.clone(),
+                });
+            }
+
+            // Periodic Console Ticker
+            tokio::select! {
+                _ = ticker_timer.tick() => {
+                    let lh = self.live_handle.lock().await;
+                    let (status_label, progress_info) = match lh.status {
+                        LiveStatus::Prewarm => {
+                            let elapsed = event.time_canonical - lh.prewarm_start_ts.unwrap_or(event.time_canonical);
+                            let mins = elapsed / 60_000;
+                            let pct = (elapsed as f64 / 7_200_000.0 * 100.0).min(100.0);
+                            ("PREWARM", format!("Elapsed:{}m ({:.1}%)", mins, pct))
+                        },
+                        LiveStatus::LiveReady => ("LIVE_READY", "ACTIVE".to_string()),
+                    };
+
+                    let spread = if let (Some(b), Some(a)) = (event.best_bid, event.best_ask) {
+                        if lh.last_mid > 0.0 { (a - b) / lh.last_mid * 10000.0 } else { 0.0 }
+                    } else { 0.0 };
+
+                    println!("[{}] {} | {} | WS:{} | PX:{:.2} | SPR:{:.1}bps | VAL:{}/148 | ACT:NONE | SRC:none",
+                        chrono::Utc::now().format("%H:%M:%S"),
+                        status_label,
+                        progress_info,
+                        lh.ws_status,
+                        lh.last_mid,
+                        spread,
+                        lh.features_valid_count
+                    );
+                }
+                else => {}
+            }
+        }
+        
+        Ok(())
+    }
 
     // Helper to validate dataset profile vs brain requirement
     // TODO: This should be called in reset_episode once we have Metadata in ResetRequest
@@ -1155,6 +1356,14 @@ impl RlService for RLServiceImpl {
             use_selective_entry: cfg.use_selective_entry,
             entry_veto_threshold_bps: 2.5,
             imbalance_block_threshold: cfg.imbalance_block_threshold,
+            use_selective_entry_long_v2: cfg.use_selective_entry_long_v2,
+            long_veto_imbalance_threshold: cfg.long_veto_imbalance_threshold,
+            long_veto_bb_pos_5m_threshold: if cfg.long_veto_bb_pos_5m_threshold > 0.0 { cfg.long_veto_bb_pos_5m_threshold } else { 1.0 },
+            long_veto_regime_dead_threshold: if cfg.long_veto_regime_dead_threshold > 0.0 { cfg.long_veto_regime_dead_threshold } else { 1.0 },
+            use_selective_entry_short_v1: cfg.use_selective_entry_short_v1,
+            short_veto_imbalance_threshold: cfg.short_veto_imbalance_threshold,
+            short_veto_bb_pos_5m_threshold: if cfg.short_veto_bb_pos_5m_threshold > 0.0 { cfg.short_veto_bb_pos_5m_threshold } else { 0.0 },
+            short_veto_regime_dead_threshold: if cfg.short_veto_regime_dead_threshold > 0.0 { cfg.short_veto_regime_dead_threshold } else { 1.0 },
             orderbook: SimOrderBook::new(),
             step_count: 0, last_tick_ts: 0, last_mid_price: 0.0, last_mark_price: 0.0, last_features: None,
                         reward_config: RewardConfig {

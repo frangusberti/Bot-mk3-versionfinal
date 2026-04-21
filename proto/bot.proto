@@ -582,6 +582,12 @@ message RLConfig {
     double exit_fallback_mfe_giveback_bps = 65;
     double exit_fallback_thesis_decay_threshold = 66;
     float exit_maker_pricing_multiplier = 67;
+
+    // Short selective entry v1 (symmetric veto to long_v2)
+    bool use_selective_entry_short_v1 = 68;
+    double short_veto_imbalance_threshold = 69;
+    double short_veto_bb_pos_5m_threshold = 70;
+    double short_veto_regime_dead_threshold = 71;
 }
 
 message Observation {

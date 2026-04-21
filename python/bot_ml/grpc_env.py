@@ -82,6 +82,10 @@ class GrpcTradingEnv(gym.Env):
         long_veto_regime_dead_threshold: float = 0.0,
         reward_exit_taker_penalty_weight: float = 0.0,
         reward_exit_maker_bonus_weight: float = 0.0,
+        use_selective_entry_short_v1: bool = False,
+        short_veto_imbalance_threshold: float = 0.20,
+        short_veto_bb_pos_5m_threshold: float = 0.65,
+        short_veto_regime_dead_threshold: float = 0.60,
         **kwargs
     ):
         super().__init__()
@@ -171,6 +175,10 @@ class GrpcTradingEnv(gym.Env):
             long_veto_regime_dead_threshold=long_veto_regime_dead_threshold,
             reward_exit_taker_penalty_weight=reward_exit_taker_penalty_weight,
             reward_exit_maker_bonus_weight=reward_exit_maker_bonus_weight,
+            use_selective_entry_short_v1=use_selective_entry_short_v1,
+            short_veto_imbalance_threshold=short_veto_imbalance_threshold,
+            short_veto_bb_pos_5m_threshold=short_veto_bb_pos_5m_threshold,
+            short_veto_regime_dead_threshold=short_veto_regime_dead_threshold,
             use_exit_curriculum_d1=kwargs.get("use_exit_curriculum_d1", False),
             maker_first_exit_timeout_ms=kwargs.get("maker_first_exit_timeout_ms", 30000),
             exit_fallback_loss_bps=kwargs.get("exit_fallback_loss_bps", 10.0),
@@ -234,8 +242,11 @@ class GrpcTradingEnv(gym.Env):
 
     def step(self, action: int):
         """Execute one step in the environment."""
-        req = bot_pb2.StepRequest(episode_id=self.episode_id)
-        req.action.type = action
+        action_msg = bot_pb2.Action(type=action)
+        req = bot_pb2.StepRequest(
+            episode_id=self.episode_id,
+            action=action_msg,
+        )
 
         resp = self.stub.Step(req)
 

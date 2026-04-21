@@ -12,10 +12,7 @@ use bot_core::proto::orchestrator_service_server::OrchestratorServiceServer;
 use bot_core::proto::backtest_service_server::BacktestServiceServer;
 
 
-mod services;
-mod engine;
-mod runner;
-pub mod config;
+use bot_server::{services, engine, runner, config, telemetry};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,6 +20,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let port = std::env::var("BOT_PORT").unwrap_or_else(|_| "50051".to_string());
     let addr: std::net::SocketAddr = format!("0.0.0.0:{}", port).parse().unwrap();
+
+    let args: Vec<String> = std::env::args().collect();
+    let is_live = args.contains(&"--live".to_string());
+    let mode = if args.contains(&"--mode".to_string()) {
+        let idx = args.iter().position(|r| r == "--mode").unwrap();
+        args.get(idx + 1).cloned().unwrap_or_else(|| "observer".to_string())
+    } else {
+        "observer".to_string()
+    };
+    let symbol = if args.contains(&"--symbol".to_string()) {
+        let idx = args.iter().position(|r| r == "--symbol").unwrap();
+        args.get(idx + 1).cloned().unwrap_or_else(|| "BTCUSDT".to_string())
+    } else {
+        "BTCUSDT".to_string()
+    };
+
+    if is_live {
+        info!("STARTING BOT MK3 IN LIVE MODE: mode={}, symbol={}", mode, symbol);
+        let data_dir = std::path::PathBuf::from(".");
+        let rl_service = services::rl::RLServiceImpl::new(data_dir.join("runs"));
+        
+        // Initializer for Live Observer (Etapa 1)
+        if mode == "observer" {
+            rl_service.run_live_observer(symbol).await?;
+            return Ok(());
+        } else {
+            return Err(format!("Mode '{}' not yet implemented in Live", mode).into());
+        }
+    }
+
     info!("Bot Mk3 Server listening on {}", addr);
 
     let health_monitor = std::sync::Arc::new(bot_data::health::HealthMonitor::new());
@@ -50,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         server_config.websocket,
     );
     let health_service = services::health::HealthServiceImpl::new(health_monitor.clone());
-    let market_service = services::market::MarketServiceImpl::new(snapshot_tx);
+    let market_service = services::market::service::MarketServiceImpl::new(snapshot_tx);
     let dataset_service = services::dataset::DatasetServiceImpl::new(data_dir.clone());
     let replay_service = services::replay::ReplayServiceImpl::new(data_dir.join("runs"));
     let feature_service = services::features::FeatureServiceImpl::new(data_dir.join("runs"));
