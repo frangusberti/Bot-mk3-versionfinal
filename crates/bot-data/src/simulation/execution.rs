@@ -124,14 +124,14 @@ impl ExecutionEngine {
 
         // 3. Liquidation Check
         let mut liquidated_symbols = Vec::new();
-        for (symbol, pos) in self.portfolio.state.positions.iter() {
+        if let Some(pos) = self.portfolio.state.positions.get(&event.symbol) {
             if pos.liquidation_price > 0.0 {
                 let is_liquidated = match pos.side {
                     Side::Buy => price.map(|p| p <= pos.liquidation_price).unwrap_or(false),
                     Side::Sell => price.map(|p| p >= pos.liquidation_price).unwrap_or(false),
                 };
                 if is_liquidated {
-                    liquidated_symbols.push(symbol.clone());
+                    liquidated_symbols.push(event.symbol.clone());
                 }
             }
         }
@@ -615,10 +615,13 @@ impl ExecutionEngine {
         let order_notional = qty * price;
         
         // Calculate Total Portfolio Notional AFTER this order
-        let mut current_notional = 0.0;
-        for pos in self.portfolio.state.positions.values() {
-            current_notional += pos.qty * price; // Approximation with current price
-        }
+        let current_notional: f64 = self
+            .portfolio
+            .state
+            .positions
+            .values()
+            .map(|pos| pos.notional_value)
+            .sum();
         let total_notional_after = current_notional + order_notional;
         let total_leverage = if current_equity > 0.0 { total_notional_after / current_equity } else { 999.0 };
 

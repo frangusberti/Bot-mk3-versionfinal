@@ -290,6 +290,7 @@ impl OrchestratorEngine {
                     ..Default::default()
                 };
                 exec_cfg.slip_bps = 1.0;
+                exec_cfg.disaster_stop_dd_daily_pct = 100.0;
 
                 match self.load_paper_state() {
                     Some(state) => {
@@ -679,7 +680,6 @@ impl OrchestratorEngine {
     }
 
     async fn handle_status(&self) -> OrchestratorStatus {
-        let risk = self.risk_manager.lock().unwrap();
         let mut symbols = vec![];
         for status_lock in self.symbol_statuses.values() {
             let s = status_lock.lock().unwrap();
@@ -687,6 +687,7 @@ impl OrchestratorEngine {
         }
 
         let total_margin: f64 = symbols.iter().map(|s| s.equity_alloc_used).sum();
+        let risk = self.risk_manager.lock().unwrap();
 
         OrchestratorStatus {
             state: if self.agents.is_empty() {

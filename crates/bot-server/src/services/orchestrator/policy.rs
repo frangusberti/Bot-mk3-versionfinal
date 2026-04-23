@@ -45,7 +45,9 @@ pub struct HttpInferResponse {
 pub struct ProfileResponse {
     pub schema_version: u16,
     pub obs_dim: usize,
+    #[serde(rename = "policy_type", default)]
     pub _policy_type: String,
+    #[serde(rename = "model_path", default)]
     pub _model_path: Option<String>,
 }
 

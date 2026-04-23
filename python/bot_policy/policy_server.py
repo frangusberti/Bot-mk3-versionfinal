@@ -96,7 +96,7 @@ class ProfileResponse(BaseModel):
 @app.get("/profile", response_model=ProfileResponse)
 def get_profile():
     schema_v = state.config.get("schema_version", 1)
-    obs_dim = 148 if schema_v >= 6 else (118 if schema_v == 5 else (76 if schema_v >= 4 else (70 if schema_v == 3 else 0)))
+    obs_dim = 166 if schema_v >= 7 else (148 if schema_v >= 6 else (118 if schema_v == 5 else (76 if schema_v >= 4 else (70 if schema_v == 3 else 0))))
     
     if state.policy is not None and hasattr(state.policy, "model") and getattr(state.policy, "model", None) is not None:
         if hasattr(state.policy.model, "observation_space"):
@@ -119,7 +119,9 @@ async def infer(cmd: InferRequest):
     reason_invalid = ""
     
     if schema_v >= 3 and len(cmd.obs) >= 70:
-        if schema_v >= 6:
+        if schema_v >= 7:
+            offset = 83
+        elif schema_v >= 6:
             offset = 74
         elif schema_v == 5:
             offset = 59
@@ -127,12 +129,20 @@ async def infer(cmd: InferRequest):
             offset = 38
         else:
             offset = 35
-        critical_idx_map = {
-            "mid_price": 0,
-            "spread_bps": 2,
-            "obi_top1": 14,
-            "microprice": 16
-        }
+        if schema_v >= 7:
+            critical_idx_map = {
+                "mid_price": 0,
+                "spread_bps": 2,
+                "obi_top1": 27,
+                "microprice": 30,
+            }
+        else:
+            critical_idx_map = {
+                "mid_price": 0,
+                "spread_bps": 2,
+                "obi_top1": 14,
+                "microprice": 16,
+            }
         for name, idx in critical_idx_map.items():
             mask_idx = offset + idx
             if mask_idx < len(cmd.obs) and cmd.obs[mask_idx] == 0.0:

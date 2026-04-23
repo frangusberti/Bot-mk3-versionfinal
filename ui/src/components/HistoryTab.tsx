@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { invoke } from "@tauri-apps/api/core";
-import { History, Search, Download, Filter } from 'lucide-react';
+import { ChevronDown } from 'lucide-react';
 
 interface Trade {
   symbol: string;
@@ -17,30 +17,13 @@ interface Trade {
 const HistoryTab: React.FC = () => {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [sessions, setSessions] = useState<string[]>([]);
-  const [selectedSession, setSelectedSession] = useState<string>("");
+  const [selected, setSelected] = useState<string>("");
   const [loading, setLoading] = useState(true);
-
-  const initData = async () => {
-    try {
-      const sids: string[] = await invoke("get_trade_sessions");
-      setSessions(sids);
-      if (sids.length > 0) {
-        setSelectedSession(sids[0]);
-        fetchHistory(sids[0]);
-      } else {
-        setLoading(false);
-      }
-    } catch (e) {
-      console.error(e);
-      setLoading(false);
-    }
-  };
 
   const fetchHistory = async (sid: string) => {
     setLoading(true);
     try {
       const data: Trade[] = await invoke("get_trade_history", { sessionId: sid });
-      // Sort by exit_ts descending
       setTrades(data.sort((a, b) => b.exit_ts - a.exit_ts));
     } catch (e) {
       console.error(e);
@@ -50,115 +33,110 @@ const HistoryTab: React.FC = () => {
   };
 
   useEffect(() => {
-    initData();
+    const init = async () => {
+      try {
+        const sids: string[] = await invoke("get_trade_sessions");
+        setSessions(sids);
+        if (sids.length > 0) {
+          setSelected(sids[0]);
+          fetchHistory(sids[0]);
+        } else {
+          setLoading(false);
+        }
+      } catch (e) {
+        console.error(e);
+        setLoading(false);
+      }
+    };
+    init();
   }, []);
 
-  const formatDate = (ts: number) => {
-    return new Date(ts).toLocaleString('es-ES', { 
-      hour: '2-digit', 
-      minute: '2-digit', 
-      second: '2-digit',
-      day: '2-digit',
-      month: 'short'
+  const fmt = (ts: number) =>
+    new Date(ts).toLocaleString('es-ES', {
+      day: '2-digit', month: 'short',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
     });
+
+  const duration = (a: number, b: number) => {
+    const s = Math.round((b - a) / 1000);
+    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
   };
 
   return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-700">
-      
-      {/* Header & Session Selector */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-900/40 p-6 rounded-3xl border border-slate-800">
-        <div className="flex items-center space-x-4 text-slate-400">
-          <History size={20} />
-          <div>
-            <h2 className="text-xl font-bold text-slate-100 italic">Auditoría Operativa</h2>
-            <p className="text-[10px] font-bold uppercase tracking-widest opacity-50">Historial de Round-Trips</p>
-          </div>
-        </div>
-        
-        <div className="flex items-center space-x-3">
-          <div className="relative group">
-            <select 
-              value={selectedSession}
-              onChange={(e) => {
-                setSelectedSession(e.target.value);
-                fetchHistory(e.target.value);
-              }}
-              className="appearance-none bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 pr-10 text-xs font-bold text-slate-300 focus:outline-none focus:border-blue-500 transition-all cursor-pointer hover:bg-slate-900"
-            >
-              {sessions.map(s => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-              {sessions.length === 0 && <option value="">Sin sesiones activas</option>}
-            </select>
-            <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50 group-hover:opacity-100 transition-opacity">
-              <Filter size={14} />
-            </div>
-          </div>
+    <div className="space-y-5">
+      {/* Session selector */}
+      <div className="flex items-center justify-between">
+        <p className="text-[11px] text-gray-500 uppercase tracking-widest font-bold">
+          Operaciones cerradas por sesión
+        </p>
+        <div className="relative">
+          <select
+            value={selected}
+            onChange={(e) => { setSelected(e.target.value); fetchHistory(e.target.value); }}
+            className="appearance-none bg-gray-900 border border-gray-700 rounded-lg pl-3 pr-8 py-1.5 text-xs font-semibold text-gray-300 focus:outline-none focus:border-blue-500 cursor-pointer"
+          >
+            {sessions.map(s => <option key={s} value={s}>{s}</option>)}
+            {sessions.length === 0 && <option value="">Sin sesiones</option>}
+          </select>
+          <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none" />
         </div>
       </div>
 
-      {/* Trades Table */}
-      <div className="bg-slate-900/40 rounded-3xl border border-slate-800 overflow-hidden shadow-2xl">
-        <div className="overflow-x-auto custom-scrollbar">
-          <table className="w-full text-left">
+      {/* Table */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm text-left">
             <thead>
-              <tr className="bg-slate-950/50 border-b border-slate-800">
-                <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-slate-500">Activo</th>
-                <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-slate-500">Lado</th>
-                <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-slate-500">Entrada / Salida</th>
-                <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-slate-500 text-right">Cantidad</th>
-                <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-slate-500 text-right">PnL Neto</th>
-                <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-slate-500 text-right">Tiempo</th>
+              <tr className="border-b border-gray-800">
+                {["Activo / Cierre", "Dirección", "Entrada → Salida", "Cantidad", "PnL Neto", "Duración"].map(h => (
+                  <th key={h} className="px-5 py-3 text-[10px] font-bold uppercase tracking-wider text-gray-600">{h}</th>
+                ))}
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-800/50">
+            <tbody className="divide-y divide-gray-800/50">
               {loading ? (
                 <tr>
-                  <td colSpan={6} className="px-6 py-12 text-center text-slate-600 italic animate-pulse">
-                    Consultando registros de auditoría...
+                  <td colSpan={6} className="px-5 py-10 text-center text-gray-600 text-sm animate-pulse">
+                    Cargando historial...
                   </td>
                 </tr>
               ) : trades.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-6 py-12 text-center text-slate-600 italic">
-                    No se han registrado operaciones en esta sesión.
+                  <td colSpan={6} className="px-5 py-10 text-center text-gray-600 text-sm">
+                    No hay operaciones registradas en esta sesión.
                   </td>
                 </tr>
               ) : trades.map((t, idx) => (
-                <tr key={idx} className="hover:bg-slate-800/30 transition-colors group">
-                  <td className="px-6 py-5">
-                    <div className="flex flex-col">
-                      <span className="font-bold text-slate-200">{t.symbol}</span>
-                      <span className="text-[10px] text-slate-500 font-mono">{formatDate(t.exit_ts)}</span>
-                    </div>
+                <tr key={idx} className="hover:bg-gray-800/30 transition-colors group">
+                  <td className="px-5 py-4">
+                    <span className="font-semibold text-gray-200">{t.symbol}</span>
+                    <div className="text-[10px] text-gray-600 font-mono mt-0.5">{fmt(t.exit_ts)}</div>
                   </td>
-                  <td className="px-6 py-5">
-                    <span className={`px-2 py-1 rounded-md text-[10px] font-bold uppercase ${t.side.toUpperCase() === 'LONG' ? 'bg-emerald-500/10 text-emerald-500' : 'bg-rose-500/10 text-rose-500'}`}>
+                  <td className="px-5 py-4">
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase border ${
+                      t.side.toUpperCase() === 'LONG'
+                        ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                        : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+                    }`}>
                       {t.side.toUpperCase() === 'LONG' ? 'Largo' : 'Corto'}
                     </span>
                   </td>
-                  <td className="px-6 py-5">
-                    <div className="flex flex-col font-mono text-xs">
-                      <span className="text-slate-300">${t.entry_price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                      <span className="text-slate-500 text-[10px] mt-0.5">➔ ${t.exit_price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                    </div>
+                  <td className="px-5 py-4 font-mono text-xs">
+                    <span className="text-gray-300">${t.entry_price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                    <span className="text-gray-600 mx-1.5">→</span>
+                    <span className="text-gray-400">${t.exit_price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
                   </td>
-                  <td className="px-6 py-5 text-right font-mono text-xs text-slate-400">
-                    {t.qty.toLocaleString()}
-                  </td>
-                  <td className="px-6 py-5 text-right font-mono text-sm">
-                    <span className={`font-bold ${t.pnl_net >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                      {t.pnl_net >= 0 ? '+' : ''}{t.pnl_net.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                  <td className="px-5 py-4 font-mono text-gray-500 text-xs">{t.qty.toLocaleString()}</td>
+                  <td className="px-5 py-4">
+                    <span className={`font-mono font-bold text-sm ${t.pnl_net >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {t.pnl_net >= 0 ? '+' : ''}${t.pnl_net.toLocaleString(undefined, { minimumFractionDigits: 2 })}
                     </span>
-                    <div className="text-[9px] text-slate-500 font-bold opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="text-[10px] text-gray-700 font-mono opacity-0 group-hover:opacity-100 transition-opacity mt-0.5">
                       Fees: ${t.fees.toFixed(2)}
                     </div>
                   </td>
-                  <td className="px-6 py-5 text-right">
-                    <span className="text-[10px] font-bold text-slate-600 bg-slate-800/50 px-2 py-1 rounded-full">
-                      {Math.round((t.exit_ts - t.entry_ts) / 1000)}s
-                    </span>
+                  <td className="px-5 py-4">
+                    <span className="text-[11px] font-mono text-gray-500">{duration(t.entry_ts, t.exit_ts)}</span>
                   </td>
                 </tr>
               ))}
@@ -166,7 +144,6 @@ const HistoryTab: React.FC = () => {
           </table>
         </div>
       </div>
-
     </div>
   );
 };

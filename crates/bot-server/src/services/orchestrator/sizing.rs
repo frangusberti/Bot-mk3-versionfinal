@@ -22,7 +22,7 @@ impl Default for DynamicSizingConfig {
             regime_trend_mult: 1.0,
             regime_range_mult: 0.75,
             regime_shock_mult: 0.30,
-            regime_dead_mult: 0.00,
+            regime_dead_mult: 0.25,
             exec_qual_floor_mult: 0.50,
             min_confidence: 0.50,
         }

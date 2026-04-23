@@ -73,6 +73,8 @@ pub struct SymbolAgent {
     cash_balance: f64,
     last_sync_ts: Instant,
     last_features: Option<FeatureRow>,
+    latest_mid_price: f64,
+    latest_market_ts: i64,
 
     // Throttling
     last_analytics_ts: i64,
@@ -139,6 +141,8 @@ impl SymbolAgent {
             cash_balance: initial_equity,
             last_sync_ts: Instant::now(),
             last_features: None,
+            latest_mid_price: 0.0,
+            latest_market_ts: 0,
             last_analytics_ts: 0,
             first_desynced_ts: None,
             desync_watchdog_triggered: false,
@@ -245,6 +249,18 @@ impl SymbolAgent {
         let ts = md.time_canonical;
         let exchange_ts = md.time_exchange;
         let recv_ts = md.recv_time.unwrap_or(0);
+
+        if let (Some(bid), Some(ask)) = (md.best_bid, md.best_ask) {
+            if bid > 0.0 && ask > 0.0 {
+                self.latest_mid_price = (bid + ask) / 2.0;
+                self.latest_market_ts = ts;
+            }
+        } else if let Some(price) = md.price {
+            if price > 0.0 {
+                self.latest_mid_price = price;
+                self.latest_market_ts = ts;
+            }
+        }
 
         // 1. Maintain OrderBook
         if md.event_type == "depthUpdate" {
@@ -385,7 +401,11 @@ impl SymbolAgent {
             (e, p_qty, p_side, p_entry, p_fees, p_pnl, p_info)
         };
 
-        let current_mid = self.feature_engine.current_mid_price().unwrap_or(0.0);
+        let current_mid = self
+            .feature_engine
+            .current_mid_price()
+            .filter(|p| *p > 0.0)
+            .unwrap_or(self.latest_mid_price);
 
         let unrealized_pnl = if pos_qty.abs() > 0.0 {
             let diff = current_mid - entry_price;
@@ -466,6 +486,11 @@ impl SymbolAgent {
             s.entry_fees = realized_fees;
             s.exit_fees = 0.0;
             s.last_decision_ts = self.last_decision_ts;
+            s.event_rate = if self.latest_market_ts > 0 {
+                (chrono::Utc::now().timestamp_millis() - self.latest_market_ts) as f64
+            } else {
+                0.0
+            };
             s.status = format!("{:?}", self.orderbook.status);
             s.ob_consecutive_failures = self.orderbook.consecutive_failures;
             s.ob_next_resync_delay_ms = self.orderbook.calculate_backoff_delay().as_millis() as u32;
@@ -1409,7 +1434,9 @@ impl SymbolAgent {
                     return;
                 }
 
-                let order_type = {
+                let order_type = if self.config.exec_mode.eq_ignore_ascii_case("MARKET") {
+                    OrderDecision::UseTaker
+                } else {
                     let policy = self.commission_policy.lock().unwrap();
                     let stats = self.commission_stats.lock().unwrap();
                     // Determine intent / urgency from context
@@ -1421,7 +1448,7 @@ impl SymbolAgent {
                     let urgency = UrgencyLevel::Normal;
                     decide_order_type(
                         &policy, &stats, &intent, &urgency, side, best_bid, best_ask, 2.0, 4.0,
-                        1.0, expected_net_edge_bps, is_dead_regime 
+                        1.0, expected_net_edge_bps, is_dead_regime
                     )
                 };
                 let (order_type_str, limit_price) = match order_type {

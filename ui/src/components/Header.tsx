@@ -1,60 +1,78 @@
-import React from 'react';
-import StatusBadge from './StatusBadge';
-import { ShieldCheck, Zap, Activity } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { invoke } from "@tauri-apps/api/core";
+import { Circle } from 'lucide-react';
+import type { Tab } from '../App';
+
+const TAB_LABELS: Record<Tab, string> = {
+  dashboard:  "Panel Principal",
+  posiciones: "Posiciones Abiertas",
+  mercado:    "Análisis de Mercado",
+  historial:  "Historial de Operaciones",
+  sistema:    "Sistema y Configuración",
+};
 
 interface HeaderProps {
-  activeTab: string;
+  activeTab: Tab;
 }
 
 const Header: React.FC<HeaderProps> = ({ activeTab }) => {
-  const getTitle = () => {
-    switch(activeTab) {
-      case 'summary': return 'Resumen de Misión';
-      case 'market': return 'Análisis de Mercado';
-      case 'operations': return 'Panel de Operaciones';
-      case 'history': return 'Historial de Trades';
-      case 'config': return 'Configuración del Bot';
-      case 'lab': return 'Laboratorio Avanzado';
-      default: return 'Bot MK3';
+  const [equity, setEquity] = useState<number | null>(null);
+  const [mode, setMode] = useState<string | null>(null);
+  const [connected, setConnected] = useState(false);
+
+  const poll = async () => {
+    try {
+      const ops: any = await invoke("get_operational_status");
+      setEquity(ops.equity ?? null);
+      setMode(ops.mode ?? null);
+      setConnected(true);
+    } catch {
+      setConnected(false);
     }
   };
 
-  return (
-    <header className="h-20 bg-slate-900/50 backdrop-blur-md border-b border-slate-800 flex items-center justify-between px-8 sticky top-0 z-10">
-      <div className="flex flex-col">
-        <h1 className="text-xl font-bold text-white tracking-tight">{getTitle()}</h1>
-        <div className="flex items-center text-[10px] text-slate-500 font-bold tracking-widest uppercase mt-0.5">
-          <span>SISTEMA</span>
-          <span className="mx-2 opacity-50">/</span>
-          <span className="text-blue-500">{activeTab}</span>
-        </div>
-      </div>
+  useEffect(() => {
+    poll();
+    const t = setInterval(poll, 5000);
+    return () => clearInterval(t);
+  }, []);
 
-      <div className="flex items-center space-x-4">
-        <StatusBadge 
-          label="MODO VISOR" 
-          status="healthy" 
-          icon={<ShieldCheck size={12} className="text-blue-400" />} 
-        />
-        <StatusBadge 
-          label="CAPTURA ACTIVA" 
-          status="healthy" 
-          icon={<Activity size={12} />} 
-        />
-        <StatusBadge 
-          label="PAPER TRADE" 
-          status="warning" 
-          icon={<Zap size={12} />} 
-        />
-        
-        <div className="h-8 w-px bg-slate-800 mx-2" />
-        
-        <div className="flex items-center space-x-3 bg-slate-800/50 rounded-lg px-3 py-1.5 border border-slate-700">
-           <div className="flex flex-col items-end">
-             <span className="text-[10px] font-bold text-slate-500 uppercase">Equity</span>
-             <span className="text-sm font-mono font-bold text-emerald-400">$10,452.20</span>
-           </div>
+  return (
+    <header className="h-14 bg-gray-900 border-b border-gray-800 flex items-center justify-between px-6 shrink-0">
+      <h1 className="text-sm font-semibold text-white">{TAB_LABELS[activeTab]}</h1>
+
+      <div className="flex items-center gap-4">
+        {/* Connection dot */}
+        <div className="flex items-center gap-1.5 text-xs">
+          <Circle
+            size={7}
+            className={connected ? "fill-emerald-500 text-emerald-500" : "fill-rose-500 text-rose-500"}
+          />
+          <span className={connected ? "text-emerald-400" : "text-rose-400"}>
+            {connected ? "Conectado" : "Sin conexión"}
+          </span>
         </div>
+
+        {/* Mode badge */}
+        {mode && (
+          <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border ${
+            mode === 'LIVE'
+              ? 'bg-rose-500/15 text-rose-400 border-rose-500/30'
+              : 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+          }`}>
+            {mode === 'LIVE' ? '⚡ EN VIVO' : '🧪 SIMULACIÓN'}
+          </span>
+        )}
+
+        {/* Equity */}
+        {equity !== null && (
+          <div className="flex items-center gap-2 bg-gray-800 border border-gray-700 rounded px-3 py-1">
+            <span className="text-[10px] text-gray-500 uppercase font-semibold tracking-wider">Equity</span>
+            <span className="font-mono text-sm font-bold text-emerald-400">
+              ${equity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </span>
+          </div>
+        )}
       </div>
     </header>
   );
