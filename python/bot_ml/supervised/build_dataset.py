@@ -54,12 +54,25 @@ def _read_zip_csv(path: Path, has_header: bool = True) -> pd.DataFrame:
     return pd.read_csv(io.BytesIO(data), header=None)
 
 
+_AGG_COLS = ["agg_trade_id", "price", "quantity", "first_trade_id",
+             "last_trade_id", "ts_ms", "is_buyer_maker"]
+
 def load_agg_trades(symbol: str, month: str) -> pd.DataFrame:
     path = RAW_ROOT / "aggTrades" / symbol / f"{symbol}-aggTrades-{month}.zip"
     if not path.exists():
         raise FileNotFoundError(path)
-    df = _read_zip_csv(path, has_header=True)
-    df = df.rename(columns={"transact_time": "ts_ms"})
+    # Older Binance files (pre-2023) have no header row.
+    # Detect by checking whether the first field of the first data row is numeric.
+    with zipfile.ZipFile(path) as zf:
+        with zf.open(zf.namelist()[0]) as f:
+            first_line = f.readline().decode().strip()
+    has_header = not first_line.split(",")[0].strip().lstrip("-").isdigit()
+    df = _read_zip_csv(path, has_header=has_header)
+    if not has_header:
+        df.columns = _AGG_COLS
+    else:
+        # Normalize header: rename transact_time -> ts_ms if present
+        df = df.rename(columns={"transact_time": "ts_ms"})
     df["ts_ms"] = df["ts_ms"].astype("int64")
     df["price"] = df["price"].astype("float64")
     df["quantity"] = df["quantity"].astype("float64")
