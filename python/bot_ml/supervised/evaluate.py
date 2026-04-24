@@ -63,20 +63,30 @@ def simulate(
     fwd_rets: np.ndarray,
     fee_taker: float,
     slippage: float,
+    horizon: int = 1,
 ) -> dict:
-    """Simulate a held-N-bar strategy.
+    """Simulate a held-N-bar strategy with non-overlapping positions.
 
-    For each bar we open a position in direction of signal if signal != 0.
-    Position is held exactly horizon bars (encoded in fwd_rets already).
-    This is a simple, honest sim — no compounding intra-position — so Sharpe
-    and Sortino are bar-level proxies.
+    After entering at bar t (position held horizon bars), the next entry is
+    allowed at t+horizon. This prevents the compounding artifact where
+    overlapping trades inflate returns astronomically.
+
+    equity[] tracks cumulative P&L: cash bars get 0, trade bars get net_ret.
     """
     n = len(signals)
-    trade_ret = signals * fwd_rets
-    # Cost: pay fee+slip on entry and exit only when we actually trade.
     cost_per_trade = 2.0 * (fee_taker + slippage)
-    trades_mask = signals != 0
-    net_ret = np.where(trades_mask, trade_ret - cost_per_trade, 0.0)
+    net_ret = np.zeros(n, dtype=np.float64)
+    trades_mask = np.zeros(n, dtype=bool)
+
+    i = 0
+    while i < n:
+        if signals[i] != 0:
+            ret = float(signals[i]) * fwd_rets[i] - cost_per_trade
+            net_ret[i] = ret
+            trades_mask[i] = True
+            i += max(1, horizon)   # skip horizon bars before next entry
+        else:
+            i += 1
 
     equity = np.cumprod(1.0 + net_ret)
     peak = np.maximum.accumulate(equity)
@@ -161,7 +171,7 @@ def calibrate_threshold(
         sigs, fwd = _get_signals_and_fwd(preds_val, bars, mode, thr, horizon)
         if sigs.sum() == 0:
             continue
-        m = simulate(sigs, fwd, fee_taker, slippage)
+        m = simulate(sigs, fwd, fee_taker, slippage, horizon=horizon)
         if m["sharpe"] > best_sharpe:
             best_sharpe, best_thr, best_metrics = m["sharpe"], thr, m
     return best_thr, best_metrics
@@ -172,7 +182,7 @@ def evaluate(cfg: EvalConfig) -> dict:
     preds = pd.read_parquet(cfg.preds_parquet)
     bars = pd.read_parquet(cfg.labeled_bars_parquet)
     signals, fwd = _get_signals_and_fwd(preds, bars, cfg.mode, cfg.threshold, cfg.horizon)
-    metrics = simulate(signals, fwd, cfg.fee_taker, cfg.slippage)
+    metrics = simulate(signals, fwd, cfg.fee_taker, cfg.slippage, horizon=cfg.horizon)
     metrics["threshold_used"] = cfg.threshold
     metrics["split"] = cfg.split
     metrics["config"] = cfg.to_dict()
@@ -184,24 +194,34 @@ def evaluate(cfg: EvalConfig) -> dict:
     return metrics
 
 
-def buy_and_hold_metrics(fwd_rets: np.ndarray) -> dict:
-    """Baseline: always long, no fees (best case for buy-and-hold comparison)."""
+def buy_and_hold_metrics(fwd_rets: np.ndarray, horizon: int = 1) -> dict:
+    """Baseline: non-overlapping always-long with no fees.
+
+    Uses the same non-overlapping entry cadence as simulate() so the
+    comparison is apples-to-apples.
+    """
     n = len(fwd_rets)
-    equity = np.cumprod(1.0 + fwd_rets)
+    # Sample every horizon bars (same skip as simulate)
+    sampled = fwd_rets[::max(1, horizon)]
+    equity = np.cumprod(1.0 + sampled)
     peak = np.maximum.accumulate(equity)
     dd = equity / peak - 1.0
-    total_ret = float(equity[-1] - 1.0) if n else 0.0
+    total_ret = float(equity[-1] - 1.0) if len(equity) else 0.0
+    n_samples = len(sampled)
     years = n / BARS_PER_YEAR
     ann_ret = (1.0 + total_ret) ** (1.0 / years) - 1.0 if years > 0 else 0.0
-    mean_r = float(fwd_rets.mean())
-    std_r = float(fwd_rets.std(ddof=1)) if n > 1 else 0.0
-    sharpe = (mean_r / std_r) * np.sqrt(BARS_PER_YEAR) if std_r > 0 else 0.0
+    mean_r = float(sampled.mean())
+    std_r = float(sampled.std(ddof=1)) if n_samples > 1 else 0.0
+    # Annualise Sharpe using the sampling frequency
+    bars_per_year_sampled = BARS_PER_YEAR / max(1, horizon)
+    sharpe = (mean_r / std_r) * np.sqrt(bars_per_year_sampled) if std_r > 0 else 0.0
     return {
         "strategy": "buy_and_hold",
         "total_return": round(total_ret, 4),
         "annualized_return": round(float(ann_ret), 4),
         "sharpe": round(float(sharpe), 3),
         "max_drawdown": round(float(dd.min()), 4),
+        "n_periods": n_samples,
     }
 
 
@@ -230,7 +250,7 @@ def evaluate_with_val_calibration(
 
     print(f"[eval] evaluating test with fixed threshold ({mode})…")
     test_sigs, test_fwd = _get_signals_and_fwd(test_preds, bars, mode, best_thr, horizon)
-    test_metrics = simulate(test_sigs, test_fwd, fee_taker, slippage)
+    test_metrics = simulate(test_sigs, test_fwd, fee_taker, slippage, horizon=horizon)
     test_metrics["threshold_used"] = best_thr
     test_metrics["split"] = "test_out_of_sample"
     (out_dir / f"metrics_{mode}_test.json").write_text(
@@ -245,7 +265,7 @@ def evaluate_with_val_calibration(
     test_sigs_bh = np.ones(len(test_preds), dtype=np.int8)
     _, test_fwd_bh = _get_signals_and_fwd(test_preds, bars, mode, 0.0, horizon)
     # For bh we just use the raw fwd returns without fee (theoretical best case)
-    bh = buy_and_hold_metrics(test_fwd_bh)
+    bh = buy_and_hold_metrics(test_fwd_bh, horizon=horizon)
     (out_dir / f"metrics_{mode}_buy_and_hold.json").write_text(json.dumps(bh, indent=2))
     print(f"[eval] buy_and_hold benchmark: sharpe={bh['sharpe']:.3f} "
           f"ann_ret={bh['annualized_return']:.2%} dd={bh['max_drawdown']:.2%}")
