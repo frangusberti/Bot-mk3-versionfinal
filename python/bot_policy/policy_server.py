@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
 import uvicorn
 from policies import HoldPolicy, HeuristicPolicy, SB3PPOPolicy
+from regime_router import RegimeRouter
 
 # Logging Setup
 os.makedirs("data/policy_logs", exist_ok=True)
@@ -66,6 +67,8 @@ class ServerState:
             self.policy = HeuristicPolicy()
         elif p_type == "sb3_ppo":
             self.policy = SB3PPOPolicy(self.config.get("model_path"))
+        elif p_type == "regime_router":
+            self.policy = RegimeRouter(self.config)
         else:
             self.policy = HoldPolicy()
         logger.info(f"Policy initialized: {p_type}")
@@ -96,7 +99,7 @@ class ProfileResponse(BaseModel):
 @app.get("/profile", response_model=ProfileResponse)
 def get_profile():
     schema_v = state.config.get("schema_version", 1)
-    obs_dim = 166 if schema_v >= 7 else (148 if schema_v >= 6 else (118 if schema_v == 5 else (76 if schema_v >= 4 else (70 if schema_v == 3 else 0))))
+    obs_dim = 200 if schema_v >= 8 else (166 if schema_v >= 7 else (148 if schema_v >= 6 else (118 if schema_v == 5 else (76 if schema_v >= 4 else (70 if schema_v == 3 else 0)))))
     
     if state.policy is not None and hasattr(state.policy, "model") and getattr(state.policy, "model", None) is not None:
         if hasattr(state.policy.model, "observation_space"):
@@ -120,7 +123,7 @@ async def infer(cmd: InferRequest):
     
     if schema_v >= 3 and len(cmd.obs) >= 70:
         if schema_v >= 7:
-            offset = 83
+            offset = 100 if schema_v >= 8 else 83
         elif schema_v >= 6:
             offset = 74
         elif schema_v == 5:
@@ -186,6 +189,18 @@ async def infer(cmd: InferRequest):
         "log_prob": log_prob,
         "value": value,
         "obs": [round(x, 8) for x in cmd.obs[:6]],
+        # heuristic decision features (schema v7 indices)
+        "ret_5s":   round(cmd.obs[6], 8) if len(cmd.obs) > 6 else None,
+        "ret_10s":  round(cmd.obs[7], 8) if len(cmd.obs) > 7 else None,
+        "ret_30s":  round(cmd.obs[8], 8) if len(cmd.obs) > 8 else None,
+        "rv_30s":   round(cmd.obs[10], 8) if len(cmd.obs) > 10 else None,
+        "obi_top1": round(cmd.obs[27], 8) if len(cmd.obs) > 27 else None,
+        "ret_15m":  round(cmd.obs[84], 8) if len(cmd.obs) > 84 else None,
+        "ret_1h":   round(cmd.obs[85], 8) if len(cmd.obs) > 85 else None,
+        "ctx_trend": round(cmd.obs[92], 8) if len(cmd.obs) > 92 else None,
+        "ctx_shock": round(cmd.obs[94], 8) if len(cmd.obs) > 94 else None,
+        "trend_alignment": round(cmd.obs[99], 8) if len(cmd.obs) > 99 else None,
+        "regime": reason.split(":")[0] if ":" in reason else None,
     }
     log_decision(log_data)
 
@@ -221,6 +236,8 @@ def reload(req: ReloadRequest):
     try:
         if p_type == "heuristic":
             state.policy = HeuristicPolicy()
+        elif p_type == "regime_router":
+            state.policy = RegimeRouter(state.config)
         elif p_type == "sb3_ppo":
             path = state.config.get("model_path")
             if not path or not os.path.exists(path):
@@ -274,7 +291,26 @@ def reload(req: ReloadRequest):
 
 @app.get("/metrics")
 def metrics():
-    return state.metrics
+    base = dict(state.metrics)
+    if isinstance(state.policy, RegimeRouter):
+        base["regime_stats"] = state.policy.get_regime_stats()
+    return base
+
+
+class RegimeModelRequest(BaseModel):
+    regime: str
+    model_path: str
+
+@app.post("/reload_regime")
+def reload_regime(req: RegimeModelRequest):
+    """Hot-swap el modelo de un régimen específico sin reiniciar el servidor."""
+    if not isinstance(state.policy, RegimeRouter):
+        raise HTTPException(status_code=400, detail="Policy no es regime_router")
+    try:
+        state.policy.reload_model(req.regime, req.model_path)
+        return {"status": "ok", "regime": req.regime, "model_path": req.model_path}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

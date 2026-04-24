@@ -274,72 +274,70 @@ def main():
         model.save(candidate_path)
         print("Training completed.")
         
-        # --- Model Governance / Acceptance Gate ---
-        print("\n--- Running Acceptance Gate ---")
+        # --- Model Governance: Walk-Forward Gate ---
+        print("\n--- Running Walk-Forward Acceptance Gate ---")
         registry = ModelRegistry()
-        
-        # A. Create Eval Env (Reuse similar config)
-        # Use a subset of episodes for validation? Or same set (Recalling)
-        # "Replay last training window" -> Use the episodes we just trained on?
-        # User said "Replay LAST training window".
-        # Let's use the last N episodes from the list for validation.
-        eval_episodes = episodes[-20:] if len(episodes) > 20 else episodes
-        print(f"Evaluating on {len(eval_episodes)} episodes.")
-        
-        def make_eval_env():
-             return window_env.WindowTradingEnv(
-                episodes=eval_episodes,
-                server_addr=args.server,
-                seed=args.seed, # Same seed for fair comparison
-                max_leverage=args.leverage,
-                max_pos_frac=args.pos_frac,
-                hard_disaster_dd=args.disaster_dd,
-                feature_profile=args.profile
-            )
-        eval_env = DummyVecEnv([make_eval_env])
-        # Note: We need to ensure WindowTradingEnv populates 'metrics' in info on done.
-        
-        # B. Benchmark New Model
-        print("Benchmarking New Model...")
-        metrics_new = evaluate_model(model, eval_env, num_episodes=len(eval_episodes))
-        print(f"New Model Metrics: {metrics_new}")
-        
-        # C. Benchmark Old Model
-        metrics_old = {"net_pnl": 0.0, "max_dd": 0.0, "trade_count": 0}
         parent_id = None
-        
-        if args.load_model and os.path.exists(args.load_model):
-            print(f"Benchmarking Old Model ({args.load_model})...")
-            try:
-                old_model = PPO.load(args.load_model)
-                metrics_old = evaluate_model(old_model, eval_env, num_episodes=len(eval_episodes))
-                print(f"Old Model Metrics: {metrics_old}")
-                parent_id = os.path.basename(args.load_model) # Rough ID
-            except Exception as e:
-                print(f"Failed to load/eval old model: {e}")
-        else:
-             print("No old model to compare against. Assuming baseline 0.")
 
-        # D. Register and Judge
+        # Split episodes into 3 temporal folds (chronological order preserved).
+        # Re-build ordered episode list so folds represent early/mid/late data.
+        try:
+            from episode_builder import EpisodeBuilder as _EB
+            _ordered = _EB(args.index).build_windows(symbols, window_len_secs=args.window, stride_secs=args.stride)
+        except Exception:
+            _ordered = episodes
+
+        n = len(_ordered)
+        fold_size = max(1, n // 3)
+        folds = [
+            _ordered[:fold_size],
+            _ordered[fold_size: fold_size * 2],
+            _ordered[fold_size * 2:],
+        ]
+        folds = [f for f in folds if f]
+
+        window_metrics_list = []
+        for i, fold_eps in enumerate(folds):
+            eval_eps = fold_eps[-20:] if len(fold_eps) > 20 else fold_eps
+            def _make_fold_env(eps=eval_eps):
+                return window_env.WindowTradingEnv(
+                    episodes=eps,
+                    server_addr=args.server,
+                    seed=args.seed,
+                    max_leverage=args.leverage,
+                    max_pos_frac=args.pos_frac,
+                    hard_disaster_dd=args.disaster_dd,
+                    feature_profile=args.profile,
+                )
+            fold_env = DummyVecEnv([_make_fold_env])
+            print(f"Walk-forward window {i+1}/{len(folds)}: {len(eval_eps)} episodes")
+            wm = evaluate_model(model, fold_env, num_episodes=len(eval_eps))
+            print(f"  net_pnl={wm['net_pnl']:.4f}  max_dd={wm['max_dd']:.4f}  trades={wm['trade_count']:.0f}")
+            window_metrics_list.append(wm)
+            fold_env.close()
+
+        if args.load_model and os.path.exists(args.load_model):
+            parent_id = os.path.basename(os.path.dirname(args.load_model)) or os.path.basename(args.load_model)
+
         model_id = registry.register_model(
-            model_path=candidate_path + ".zip", # SB3 adds .zip
-            metrics=metrics_new,
+            model_path=candidate_path + ".zip",
+            metrics=window_metrics_list[-1],
             parent_model_id=parent_id,
-            train_window={"start": "?", "end": "?"}, # Populate if data known
-            feature_profile=args.profile
+            train_window={"folds": len(folds), "episodes_total": n},
+            feature_profile=args.profile,
         )
-        
-        accepted = registry.judge_model(
+
+        accepted = registry.judge_walkforward(
             model_id=model_id,
-            old_metrics=metrics_old,
-            new_metrics=metrics_new
+            window_metrics=window_metrics_list,
+            min_passing_windows=2,
         )
-        
+
         if accepted:
-            print(f"Model {model_id} ACCEPTED. Promoting to LIVE.")
+            print(f"Model {model_id} ACCEPTED (walk-forward). Promoting to LIVE.")
             registry.promote_to_live(model_id)
         else:
-            print(f"Model {model_id} REJECTED.")
+            print(f"Model {model_id} REJECTED (walk-forward). Not promoted.")
 
     except KeyboardInterrupt:
         print("Training interrupted. Saving current model...")

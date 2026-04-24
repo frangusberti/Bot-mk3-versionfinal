@@ -1,6 +1,10 @@
 use std::collections::VecDeque;
 use serde::{Serialize, Deserialize};
 
+const HEALTH_DEGRADED_OBS_QUALITY_MIN: f32 = 0.85;
+const HEALTH_DEGRADED_BOOK_AGE_MS: i64 = 8_000;
+const HEALTH_DEGRADED_TRADES_AGE_MS: i64 = 120_000;
+
 /// Diagnostic snapshot of feature health and data quality.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureHealthReport {
@@ -29,7 +33,7 @@ pub struct FeatureHealthReport {
     pub health_state: String, // "NORMAL", "DEGRADED"
 }
 
-const NUM_FEATURES: usize = 83;
+const NUM_FEATURES: usize = 100;
 
 #[derive(Clone)]
 struct FeatureSample {
@@ -166,8 +170,13 @@ impl FeatureHealthAggregator {
         }
         let obs_quality = crit_sum / critical_indices.len() as f32;
 
+        let trades_stale = self.last_trades_ts > 0 && trades_age > HEALTH_DEGRADED_TRADES_AGE_MS;
+
         let mut health_state = "NORMAL".to_string();
-        if obs_quality < 0.95 || book_age > 5000 || trades_age > 60000 {
+        if obs_quality < HEALTH_DEGRADED_OBS_QUALITY_MIN
+            || book_age > HEALTH_DEGRADED_BOOK_AGE_MS
+            || trades_stale
+        {
             health_state = "DEGRADED".to_string();
         }
 

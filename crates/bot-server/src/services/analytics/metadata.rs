@@ -26,7 +26,7 @@ impl RunMetadata {
             run_id,
             git_commit,
             config_hash,
-            schema_version: 6, // Hardcoded schema version
+            schema_version: 8,
             started_at,
             environment,
             simulator_mode,

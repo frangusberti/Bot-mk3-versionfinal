@@ -81,7 +81,8 @@ impl RiskGate {
         let now = Instant::now();
 
         // 1. Maintain Timers
-        let health_bad = status.health_state == "DEGRADED";
+        let health_bad =
+            status.health_state == "DEGRADED" && status.obs_quality < self.obs_quality_min;
         let quality_bad = status.obs_quality < self.obs_quality_min;
         let is_normal = !health_bad && !quality_bad;
         

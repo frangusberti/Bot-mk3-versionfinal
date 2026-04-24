@@ -108,7 +108,7 @@ class GrpcTradingEnv(gym.Env):
             self.feature_signature = info_resp.feature_signature
             self.feature_profile = info_resp.feature_profile
         except grpc.RpcError:
-            obs_dim = 166  # FeatureRow::OBS_DIM (Schema v7)
+            obs_dim = 200  # FeatureRow::OBS_DIM (Schema v8)
             action_dim = 10
             self.feature_signature = "unknown"
             self.feature_profile = "unknown"

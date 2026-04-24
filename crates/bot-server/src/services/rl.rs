@@ -38,7 +38,7 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 
 // --- Constants ---
-const OBS_DIM: usize = 166;  // FeatureRow::OBS_DIM (Schema v7)
+const OBS_DIM: usize = FeatureRow::OBS_DIM;
 const ACTION_DIM: i32 = 10;
 
 const ACTION_LABELS: [&str; 10] = [

@@ -110,6 +110,60 @@ class ModelRegistry:
         self._save_metadata(model_id, metadata)
         return accepted
 
+    def judge_walkforward(
+        self,
+        model_id: str,
+        window_metrics: List[Dict],
+        min_passing_windows: int = 2,
+        min_pnl_per_window: float = 0.0,
+    ) -> bool:
+        """
+        Walk-forward gate: model must show positive net_pnl on at least
+        `min_passing_windows` out of all temporal windows provided.
+
+        Each entry in window_metrics must have at least {"net_pnl": float}.
+        On failure the model is marked REJECTED in the registry.
+        """
+        metadata = self._load_metadata(model_id)
+        if not metadata:
+            self.logger.error(f"judge_walkforward: model {model_id} not found")
+            return False
+
+        results = []
+        for i, wm in enumerate(window_metrics):
+            pnl = wm.get("net_pnl", 0.0)
+            passing = pnl > min_pnl_per_window
+            results.append({"window": i, "net_pnl": pnl, "pass": passing})
+
+        passing_count = sum(1 for r in results if r["pass"])
+        accepted = passing_count >= min_passing_windows
+
+        metadata["walkforward"] = {
+            "windows": results,
+            "passing": passing_count,
+            "required": min_passing_windows,
+            "accepted": accepted,
+        }
+
+        if accepted:
+            metadata["status"] = "ACCEPTED"
+            self.logger.info(
+                f"Model {model_id} walk-forward ACCEPTED "
+                f"({passing_count}/{len(window_metrics)} windows)"
+            )
+        else:
+            metadata["status"] = "REJECTED"
+            metadata["rejection_reason"] = (
+                f"Walk-forward failed: only {passing_count}/{len(window_metrics)} "
+                f"windows passed (need {min_passing_windows})"
+            )
+            self.logger.warning(
+                f"Model {model_id} walk-forward REJECTED: {metadata['rejection_reason']}"
+            )
+
+        self._save_metadata(model_id, metadata)
+        return accepted
+
     def promote_to_live(self, model_id: str):
         """
         Marks model as LIVE and updates symlink/pointer.

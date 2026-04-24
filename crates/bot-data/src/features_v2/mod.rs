@@ -163,6 +163,44 @@ impl FeatureEngineV2 {
         }
     }
 
+    fn record_feed_health(&mut self, ev: &NormalizedMarketEvent) {
+        let ts = ev.time_canonical;
+        let stream = ev.stream_name.as_str();
+        let event_type = ev.event_type.as_str();
+
+        if (stream.contains("aggTrade")
+            || stream.contains("trade")
+            || event_type == "trade"
+            || event_type == "aggTrade")
+            && ev.price.is_some()
+            && ev.qty.is_some()
+        {
+            self.health.last_trades_ts = ts;
+        }
+
+        if (stream.contains("bookTicker") || event_type == "bookTicker")
+            && ev.best_bid.unwrap_or_default() > 0.0
+            && ev.best_ask.unwrap_or_default() > 0.0
+        {
+            self.health.last_book_ts = ts;
+        }
+
+        if stream.contains("markPrice") || event_type == "markPrice" {
+            if ev.mark_price.is_some() {
+                self.health.last_mark_ts = ts;
+            }
+            if ev.funding_rate.is_some() {
+                self.health.last_funding_ts = ts;
+            }
+        }
+
+        if (stream.contains("openInterest") || event_type == "openInterest")
+            && (ev.open_interest.is_some() || ev.qty.is_some())
+        {
+            self.health.last_oi_ts = ts;
+        }
+    }
+
     /// Update engine state with an incoming market event.
     /// This is the "hot path" — called for every event.
     pub fn update(&mut self, ev: &NormalizedMarketEvent) {
@@ -174,6 +212,8 @@ impl FeatureEngineV2 {
             info!("FeatureEngineV2 initialized: first_ts={}, next_emit_ts={}, interval={}", 
                 ts, self.next_emit_ts, self.config.interval_ms);
         }
+
+        self.record_feed_health(ev);
 
         match self.config.time_mode {
             TimeMode::EventTimeOnly => {
@@ -485,14 +525,25 @@ impl FeatureEngineV2 {
             flow_persistence_buy: perf.flow_persistence_buy,
             flow_persistence_sell: perf.flow_persistence_sell,
             slope_mid_5s: pf.slope_mid_5s,
+            slope_mid_5m: pf.slope_mid_5m,
+            slope_mid_15m: pf.slope_mid_15m,
+            slope_mid_1h: pf.slope_mid_1h,
             microprice_confirmation: absf.microprice_confirmation_5s,
             breakout_failure: absf.breakout_failure_5s,
             spread_vs_baseline: pf.spread_vs_baseline,
             rv_5s: pf.rv_5s,
+            rv_15m: pf.rv_15m,
+            rv_1h: pf.rv_1h,
             tape_intensity_z: ff.tape_intensity_z,
             liq_count_30s: sf.liq_count_30s,
             tape_trades_1s: ff.tape_trades_1s,
             trade_imbalance_5s: ff.trade_imbalance_5s,
+            ret_5m: pf.ret_5m,
+            ret_15m: pf.ret_15m,
+            ret_1h: pf.ret_1h,
+            range_pos_5m: pf.range_pos_5m,
+            range_pos_15m: pf.range_pos_15m,
+            range_pos_1h: pf.range_pos_1h,
         };
         let regf = compute_regime::classify(
             &mut self.regime,
@@ -611,6 +662,25 @@ impl FeatureEngineV2 {
             regime_range: Some(regf.regime_range),
             regime_shock: Some(regf.regime_shock),
             regime_dead: Some(regf.regime_dead),
+
+            // M) Multi-Timeframe Context
+            ret_5m: pf.ret_5m,
+            ret_15m: pf.ret_15m,
+            ret_1h: pf.ret_1h,
+            rv_15m: pf.rv_15m,
+            rv_1h: pf.rv_1h,
+            slope_mid_1h: pf.slope_mid_1h,
+            range_pos_5m: pf.range_pos_5m,
+            range_pos_15m: pf.range_pos_15m,
+            range_pos_1h: pf.range_pos_1h,
+            context_regime_trend: Some(regf.context_regime_trend),
+            context_regime_range: Some(regf.context_regime_range),
+            context_regime_shock: Some(regf.context_regime_shock),
+            context_regime_dead: Some(regf.context_regime_dead),
+            trend_bias_5m: Some(regf.trend_bias_5m),
+            trend_bias_15m: Some(regf.trend_bias_15m),
+            trend_bias_1h: Some(regf.trend_bias_1h),
+            trend_alignment: Some(regf.trend_alignment),
         };
 
         if self.config.telemetry_enabled {
@@ -829,6 +899,30 @@ mod tests {
         let row2 = engine.maybe_emit(2100).unwrap();
         assert!(row2.taker_buy_vol_1s.is_some());
         assert_eq!(row2.taker_buy_vol_1s.unwrap(), 10.0);
+    }
+
+    #[test]
+    fn test_recv_time_aware_feed_health_updates_before_emit() {
+        let mut config = FeatureEngineV2Config::default();
+        config.time_mode = TimeMode::RecvTimeAware;
+        config.recv_time_lag_ms = 50;
+
+        let mut engine = FeatureEngineV2::new(config);
+        engine.set_orderbook_levels(vec![(100.0, 5.0)], vec![(101.0, 5.0)]);
+        engine.set_orderbook_in_sync(true);
+
+        let mut bbo = make_bookticker(1000, 100.0, 101.0);
+        bbo.recv_time = Some(1010);
+        engine.update(&bbo);
+
+        let mut trade = make_aggtrade(1020, 100.5, 2.0, false);
+        trade.recv_time = Some(1030);
+        engine.update(&trade);
+
+        let report = engine.get_health_report(1030);
+        assert_eq!(report.book_age_ms, 30);
+        assert_eq!(report.trades_age_ms, 10);
+        assert_eq!(report.health_state, "NORMAL");
     }
 
     #[test]

@@ -5,11 +5,12 @@ use serde::{Serialize, Deserialize};
 /// warmed up or the required data stream is unavailable.
 /// This struct is written to Parquet for offline training.
 ///
-/// ## Schema v7 (Pivot ITR)
+/// ## Schema v8 (Multi-Timeframe Context)
 /// - Added 9 multi-horizon technical features (RSI/BB at 1m, 5m, 15m)
 /// - Added 3 multi-horizon price slopes (60s, 5m, 15m)
-/// - Total: 83 features.
-/// - OBS_DIM: 166 (83 values + 83 masks)
+/// - Added 17 multi-timeframe context features (5m, 15m, 1h)
+/// - Total: 100 features.
+/// - OBS_DIM: 200 (100 values + 100 masks)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureRow {
     pub symbol: String,
@@ -121,6 +122,25 @@ pub struct FeatureRow {
     pub regime_range: Option<f64>,    // [0, 1] residual score
     pub regime_shock: Option<f64>,    // [0, 1] score
     pub regime_dead: Option<f64>,     // [0, 1] score
+
+    // ── M) Multi-Timeframe Context (17 features) ──
+    pub ret_5m: Option<f64>,
+    pub ret_15m: Option<f64>,
+    pub ret_1h: Option<f64>,
+    pub rv_15m: Option<f64>,
+    pub rv_1h: Option<f64>,
+    pub slope_mid_1h: Option<f64>,
+    pub range_pos_5m: Option<f64>,
+    pub range_pos_15m: Option<f64>,
+    pub range_pos_1h: Option<f64>,
+    pub context_regime_trend: Option<f64>,
+    pub context_regime_range: Option<f64>,
+    pub context_regime_shock: Option<f64>,
+    pub context_regime_dead: Option<f64>,
+    pub trend_bias_5m: Option<f64>,
+    pub trend_bias_15m: Option<f64>,
+    pub trend_bias_1h: Option<f64>,
+    pub trend_alignment: Option<f64>,
 }
 
 impl Default for FeatureRow {
@@ -217,13 +237,30 @@ impl FeatureRow {
             regime_range: None,
             regime_shock: None,
             regime_dead: None,
+            ret_5m: None,
+            ret_15m: None,
+            ret_1h: None,
+            rv_15m: None,
+            rv_1h: None,
+            slope_mid_1h: None,
+            range_pos_5m: None,
+            range_pos_15m: None,
+            range_pos_1h: None,
+            context_regime_trend: None,
+            context_regime_range: None,
+            context_regime_shock: None,
+            context_regime_dead: None,
+            trend_bias_5m: None,
+            trend_bias_15m: None,
+            trend_bias_1h: None,
+            trend_alignment: None,
         }
     }
 
-    pub fn to_obs_vec(&self) -> (Vec<f32>, [bool; 83]) {
-        let mut values = Vec::with_capacity(83);
-        let mut masks = Vec::with_capacity(83);
-        let mut clamped = [false; 83];
+    pub fn to_obs_vec(&self) -> (Vec<f32>, [bool; 100]) {
+        let mut values = Vec::with_capacity(100);
+        let mut masks = Vec::with_capacity(100);
+        let mut clamped = [false; 100];
         let mut idx = 0;
 
         let raw = |v: f64, _c: &mut bool| v as f32;
@@ -380,10 +417,29 @@ impl FeatureRow {
         add!(self.regime_shock, bounded01);
         add!(self.regime_dead, bounded01);
 
+        // M) Multi-Timeframe Context (17)
+        add!(self.ret_5m, clamp_pct);
+        add!(self.ret_15m, clamp_pct);
+        add!(self.ret_1h, clamp_pct);
+        add!(self.rv_15m, clamp_pct);
+        add!(self.rv_1h, clamp_pct);
+        add!(self.slope_mid_1h, clamp_z);
+        add!(self.range_pos_5m, bounded01);
+        add!(self.range_pos_15m, bounded01);
+        add!(self.range_pos_1h, bounded01);
+        add!(self.context_regime_trend, bounded01);
+        add!(self.context_regime_range, bounded01);
+        add!(self.context_regime_shock, bounded01);
+        add!(self.context_regime_dead, bounded01);
+        add!(self.trend_bias_5m, clamp_pct);
+        add!(self.trend_bias_15m, clamp_pct);
+        add!(self.trend_bias_1h, clamp_pct);
+        add!(self.trend_alignment, clamp_pct);
+
         values.extend(masks);
         (values, clamped)
     }
 
-    pub const OBS_DIM: usize = 166;
-    pub const OBS_SCHEMA_VERSION: u16 = 7;
+    pub const OBS_DIM: usize = 200;
+    pub const OBS_SCHEMA_VERSION: u16 = 8;
 }

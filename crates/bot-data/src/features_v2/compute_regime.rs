@@ -63,19 +63,49 @@ pub struct RegimeInputs {
     pub flow_persistence_buy: Option<f64>,
     pub flow_persistence_sell: Option<f64>,
     pub slope_mid_5s: Option<f64>,
+    pub slope_mid_5m: Option<f64>,
+    pub slope_mid_15m: Option<f64>,
+    pub slope_mid_1h: Option<f64>,
     pub microprice_confirmation: Option<f64>,
     pub breakout_failure: Option<f64>,
     pub spread_vs_baseline: Option<f64>,
     pub rv_5s: Option<f64>,
+    pub rv_15m: Option<f64>,
+    pub rv_1h: Option<f64>,
     pub tape_intensity_z: Option<f64>,
     pub liq_count_30s: f64,
     pub tape_trades_1s: f64,
     pub trade_imbalance_5s: Option<f64>,
+    pub ret_5m: Option<f64>,
+    pub ret_15m: Option<f64>,
+    pub ret_1h: Option<f64>,
+    pub range_pos_5m: Option<f64>,
+    pub range_pos_15m: Option<f64>,
+    pub range_pos_1h: Option<f64>,
 }
 
 /// Clamp to [0, 1].
 fn c01(x: f64) -> f64 {
     x.clamp(0.0, 1.0)
+}
+
+fn normalize4(a: f64, b: f64, c: f64, d: f64) -> (f64, f64, f64, f64) {
+    let sum = (a + b + c + d).max(1e-9);
+    (a / sum, b / sum, c / sum, d / sum)
+}
+
+fn bias_score(ret: f64, slope: f64, range_pos: f64, ret_scale: f64, slope_scale: f64) -> f64 {
+    let ret_term = (ret / ret_scale).tanh();
+    let slope_term = (slope / slope_scale).tanh();
+    let loc_term = ((range_pos - 0.5) * 2.0).clamp(-1.0, 1.0);
+    (0.50 * ret_term + 0.35 * slope_term + 0.15 * loc_term).clamp(-1.0, 1.0)
+}
+
+fn avg_abs(vals: &[f64]) -> f64 {
+    if vals.is_empty() {
+        return 0.0;
+    }
+    vals.iter().map(|v| v.abs()).sum::<f64>() / vals.len() as f64
 }
 
 /// Compute regime scores and perform hysteretic classification.
@@ -95,7 +125,7 @@ pub fn classify(
     thresholds: &RegimeThresholds,
 ) -> RegimeFeatures {
     let mut invalid_count = 0u32;
-    let total_inputs = 10u32;
+    let total_inputs = 19u32;
 
     // Helper: unwrap or count as invalid
     let mut get = |opt: Option<f64>, default: f64| -> f64 {
@@ -108,12 +138,23 @@ pub fn classify(
     let flow_per_buy = get(inputs.flow_persistence_buy, 0.0);
     let flow_per_sell = get(inputs.flow_persistence_sell, 0.0);
     let slope = get(inputs.slope_mid_5s, 0.0);
+    let slope_5m = get(inputs.slope_mid_5m, 0.0);
+    let slope_15m = get(inputs.slope_mid_15m, 0.0);
+    let slope_1h = get(inputs.slope_mid_1h, 0.0);
     let mp_conf = get(inputs.microprice_confirmation, 0.0);
     let brk_fail = get(inputs.breakout_failure, 0.0);
     let svb = get(inputs.spread_vs_baseline, 0.0);
     let rv = get(inputs.rv_5s, 0.0);
+    let rv_15m = get(inputs.rv_15m, 0.0);
+    let rv_1h = get(inputs.rv_1h, 0.0);
     let tape_z = get(inputs.tape_intensity_z, 0.0);
     let imb = get(inputs.trade_imbalance_5s, 0.0);
+    let ret_5m = get(inputs.ret_5m, 0.0);
+    let ret_15m = get(inputs.ret_15m, 0.0);
+    let ret_1h = get(inputs.ret_1h, 0.0);
+    let range_pos_5m = get(inputs.range_pos_5m, 0.5);
+    let range_pos_15m = get(inputs.range_pos_15m, 0.5);
+    let range_pos_1h = get(inputs.range_pos_1h, 0.5);
     // liq_count_30s and tape_trades_1s are always present (default 0)
     let liq = inputs.liq_count_30s;
     let tape_t = inputs.tape_trades_1s;
@@ -131,6 +172,14 @@ pub fn classify(
             regime_range: 0.25,
             regime_shock: 0.25,
             regime_dead: 0.25,
+            context_regime_trend: 0.25,
+            context_regime_range: 0.25,
+            context_regime_shock: 0.25,
+            context_regime_dead: 0.25,
+            trend_bias_5m: 0.0,
+            trend_bias_15m: 0.0,
+            trend_bias_1h: 0.0,
+            trend_alignment: 0.0,
         };
     }
 
@@ -196,11 +245,58 @@ pub fn classify(
     state.scores = scores;
     state.confidence = confidence;
 
+    let trend_bias_5m = bias_score(ret_5m, slope_5m, range_pos_5m, 0.0025, 0.18);
+    let trend_bias_15m = bias_score(ret_15m, slope_15m, range_pos_15m, 0.0045, 0.12);
+    let trend_bias_1h = bias_score(ret_1h, slope_1h, range_pos_1h, 0.0090, 0.06);
+    let biases = [trend_bias_5m, trend_bias_15m, trend_bias_1h];
+    let avg_bias = biases.iter().sum::<f64>() / biases.len() as f64;
+    let trend_strength = avg_abs(&biases);
+    let avg_abs_bias = trend_strength.max(1e-6);
+    let directional_consensus = (avg_bias.abs() / avg_abs_bias).clamp(0.0, 1.0);
+    let long_vol = c01((rv_15m / 0.0015).max(rv_1h / 0.0025));
+    let low_vol = c01(1.0 - (rv_15m / 0.00045).max(rv_1h / 0.0008));
+    let center_5m = 1.0 - ((range_pos_5m - 0.5).abs() * 2.0).clamp(0.0, 1.0);
+    let center_15m = 1.0 - ((range_pos_15m - 0.5).abs() * 2.0).clamp(0.0, 1.0);
+    let center_1h = 1.0 - ((range_pos_1h - 0.5).abs() * 2.0).clamp(0.0, 1.0);
+    let center_mean = (center_5m + center_15m + center_1h) / 3.0;
+
+    let trend_ctx_raw =
+        0.46 * trend_strength +
+        0.29 * directional_consensus +
+        0.15 * scores[0] as f64 +
+        0.10 * c01(1.0 - long_vol);
+    let range_ctx_raw =
+        0.36 * c01(1.0 - trend_strength) +
+        0.24 * center_mean +
+        0.20 * scores[1] as f64 +
+        0.20 * c01(1.0 - long_vol);
+    let shock_ctx_raw =
+        0.48 * long_vol +
+        0.27 * scores[2] as f64 +
+        0.15 * c01(1.0 - directional_consensus) +
+        0.10 * c01(svb / 3.0);
+    let dead_ctx_raw =
+        0.40 * low_vol +
+        0.28 * scores[3] as f64 +
+        0.20 * c01(1.0 - trend_strength) +
+        0.12 * center_mean;
+
+    let (ctx_trend, ctx_range, ctx_shock, ctx_dead) =
+        normalize4(trend_ctx_raw, range_ctx_raw, shock_ctx_raw, dead_ctx_raw);
+
     RegimeFeatures {
         regime_trend: scores[0] as f64,
         regime_range: scores[1] as f64,
         regime_shock: scores[2] as f64,
         regime_dead: scores[3] as f64,
+        context_regime_trend: ctx_trend,
+        context_regime_range: ctx_range,
+        context_regime_shock: ctx_shock,
+        context_regime_dead: ctx_dead,
+        trend_bias_5m,
+        trend_bias_15m,
+        trend_bias_1h,
+        trend_alignment: avg_bias.clamp(-1.0, 1.0),
     }
 }
 
@@ -221,6 +317,14 @@ pub struct RegimeFeatures {
     pub regime_range: f64,
     pub regime_shock: f64,
     pub regime_dead: f64,
+    pub context_regime_trend: f64,
+    pub context_regime_range: f64,
+    pub context_regime_shock: f64,
+    pub context_regime_dead: f64,
+    pub trend_bias_5m: f64,
+    pub trend_bias_15m: f64,
+    pub trend_bias_1h: f64,
+    pub trend_alignment: f64,
 }
 
 #[cfg(test)]
@@ -232,14 +336,25 @@ mod tests {
             flow_persistence_buy: Some(0.0),
             flow_persistence_sell: Some(0.0),
             slope_mid_5s: Some(0.0),
+            slope_mid_5m: Some(0.0),
+            slope_mid_15m: Some(0.0),
+            slope_mid_1h: Some(0.0),
             microprice_confirmation: Some(0.0),
             breakout_failure: Some(0.0),
             spread_vs_baseline: Some(0.0),
             rv_5s: Some(0.00001), // very low vol
+            rv_15m: Some(0.00005),
+            rv_1h: Some(0.00008),
             tape_intensity_z: Some(-2.0),
             liq_count_30s: 0.0,
             tape_trades_1s: 0.0,
             trade_imbalance_5s: Some(0.0),
+            ret_5m: Some(0.0),
+            ret_15m: Some(0.0),
+            ret_1h: Some(0.0),
+            range_pos_5m: Some(0.5),
+            range_pos_15m: Some(0.5),
+            range_pos_1h: Some(0.5),
         }
     }
 
@@ -248,14 +363,25 @@ mod tests {
             flow_persistence_buy: Some(0.9),    // strong persistent flow
             flow_persistence_sell: Some(0.0),
             slope_mid_5s: Some(0.8),            // strong slope
+            slope_mid_5m: Some(0.35),
+            slope_mid_15m: Some(0.22),
+            slope_mid_1h: Some(0.08),
             microprice_confirmation: Some(8.0),  // confirmed
             breakout_failure: Some(0.0),         // no failure
             spread_vs_baseline: Some(0.0),       // normal spread
             rv_5s: Some(0.0003),                 // moderate vol
+            rv_15m: Some(0.0007),
+            rv_1h: Some(0.0011),
             tape_intensity_z: Some(1.0),         // normal tape
             liq_count_30s: 0.0,
             tape_trades_1s: 8.0,                 // active
             trade_imbalance_5s: Some(0.7),
+            ret_5m: Some(0.003),
+            ret_15m: Some(0.008),
+            ret_1h: Some(0.014),
+            range_pos_5m: Some(0.82),
+            range_pos_15m: Some(0.76),
+            range_pos_1h: Some(0.70),
         }
     }
 
