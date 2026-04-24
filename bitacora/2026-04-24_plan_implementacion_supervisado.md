@@ -24,27 +24,31 @@ Rama: `pivot/supervised-lightgbm`
 
 ### Fase 1 — Dataset tabular para ML supervisado (1 día)
 
-Necesitamos transformar el `normalized_events.parquet` de cada mes en una matriz `(features, label)` lista para LightGBM.
+**Nota importante (corrección):** los `normalized_events.parquet` producidos por `BuildDataset` contienen **eventos normalizados crudos** (`stream_name`, `event_type`, `price`, `best_bid`, `best_ask`, …), **no** una tabla `f_0..f_199`. No existe hoy en el repo una materialización del feature set v8 como matriz por barra lista para ML. Por eso el pipeline supervisado **no parte de normalized_events** y **tampoco reconstruye v8**; construye su propio set de features desde los raw zips de Binance Futures UM.
 
 Tareas:
 
-1. Script `python/bot_ml/build_supervised_dataset.py`:
-   - Input: lista de `dataset_id` del índice (`index/datasets_index.json`).
-   - Output: un `supervised.parquet` unificado con columnas `[ts, symbol, f_0..f_199, close, future_ret_3, future_ret_12, future_ret_48, label_cls]`.
-   - Resample a barras de 5m (ya vienen así por el dataset v8).
-   - Calcular retorno forward a 3, 12 y 48 barras (15min / 1h / 4h).
+1. Script `python/bot_ml/supervised/build_dataset.py`:
+   - **Input real**: zips ya descargados en `data/raw/binance/futures/um/` (`aggTrades`, `fundingRate`, `metrics`). Opcionalmente `bookTicker` en fases siguientes.
+   - **Agregación a barras de 5m**: para cada bar con timestamp `t` (múltiplo de 5 min UTC), se agrupan todos los `aggTrades` con `transact_time ∈ [t, t+5m)`. Timestamp que manda en la fila = `t` (inicio de barra, convención left-closed).
+   - **Order flow per barra**: `buy_vol/sell_vol/buy_notional/sell_notional` derivados de `is_buyer_maker` (False = market buy, True = market sell).
+   - **Barras sin actividad**: se reindexan y rellenan con `close` ffill + volúmenes 0, así la grilla temporal queda continua.
+   - **Funding y OI**: merge `as-of backward` contra la barra 5m (funding se publica cada 8h, OI cada 5 min).
+   - **Features calculadas** (no `f_0..f_199` — set propio, documentado en `build_manifest.json`): retornos log a 1/3/6/12/24/48/96 barras, RV rolling, RSI, ATR, MACD-like, posición en rango rolling, OFI por barra y rolling, intensidad de trades, z-score de volumen, contexto multi-timeframe 15m/1h/4h (return, RV, slope).
+   - **Output**: `bars_features.parquet` con una fila por barra 5m y un `build_manifest.json` que lista las columnas reales producidas.
 
-2. Labeling — dos modos soportados:
-   - **Regresión**: target = retorno forward en barras de 5m (por defecto 12 barras = 1h).
-   - **Clasificación triple-barrier**: etiqueta `{-1, 0, +1}` según si precio toca barrera superior, inferior o ninguna en horizonte máximo. Barrera ajustada por volatilidad (k × ATR).
+2. Labeling — dos modos soportados (módulo `labeling.py`, aplicado dentro de `train.py`, no en `build_dataset.py` — así podemos retocar horizontes sin rebuild):
+   - **Regresión**: `fwd_ret_H` = `log(close[t+H]/close[t])`. Default H=12 (1h forward).
+   - **Clasificación triple-barrier**: etiqueta `{-1, 0, +1}` según qué barrera toca primero el precio en los próximos `H` bars. Barrera = `k × atr_pct_48` aplicada sobre `high/low` intra-bar, con una regla de desempate por retorno al final del horizonte.
 
 3. Split temporal estricto:
    - train: 2023-11 → 2024-01
    - val: 2024-02
    - test: 2024-03
-   - **Gap** entre splits (purging) de al menos `max_horizon` barras para evitar leakage por solapamiento.
+   - **Purge**: se descartan las últimas `H` barras de train y las primeras `H` barras de val/test. Esto asegura que ninguna etiqueta forward-looking de un split cruza al siguiente. (Hoy implementado como `purge_bars = horizon`.)
+   - **Embargo explícito**: fuera de esto no hay embargo adicional — si en fases siguientes usamos CV con bloques internos, habrá que agregarlo.
 
-**Deliverable**: `C:\Bot mk3\python\runs_train\supervised_btc_v1\dataset\supervised.parquet` + `manifest.json`.
+**Deliverable**: `C:\Bot mk3\python\runs_train\supervised_btc_v1\dataset\bars_features.parquet` + `build_manifest.json`.
 
 ---
 
@@ -72,17 +76,27 @@ Script `python/bot_ml/train_lightgbm_baseline.py`:
 
 ### Fase 3 — Evaluación financiera honesta (½ día)
 
-Script `python/bot_ml/eval_supervised.py`:
+**Regla de uso de splits (corrección importante):**
+
+- `train`: entrenamiento de pesos del modelo.
+- `val`: (a) early stopping, (b) calibración del `threshold` de señal y cualquier otro hiperparámetro de decisión. Todo lo que toque `val` es **in-sample para decisión**.
+- `test`: **reporte final únicamente**. No se toca para ninguna decisión de modelo, umbral, ni regla. Se evalúa **una vez** con los hiperparámetros ya congelados en val.
+
+Consecuencia: las métricas sobre `val` **no son** métricas de generalización; son métricas de ajuste. El número que se reporta como "performance esperada" es siempre el de `test`. Cuando aparezcan ambas en tablas, tienen que estar etiquetadas explícitamente como "val (in-sample decisión)" vs "test (out-of-sample)".
+
+Si en el futuro queremos tunear más cosas y `test` no alcanza para robustez, pasamos a walk-forward rolling con múltiples bloques `(train, val, test)` en vez de un único split.
+
+Script `python/bot_ml/supervised/evaluate.py`:
 
 1. Convertir predicciones → señal de trading con regla simple:
    - Si `|pred| > threshold`, entrar en dirección del signo.
-   - `threshold` calibrado sobre val (no test).
+   - `threshold` calibrado **únicamente sobre val**.
    - Position sizing fijo inicial: 15% del equity por trade, leverage 3×.
 2. Simular con costos reales:
    - Fee taker Binance: 0.05% por lado = 0.10% round-trip.
    - Slippage: 1 bp por lado (conservador para BTC).
    - Funding rate aplicado si hold >8h.
-3. Métricas:
+3. Métricas (reportadas por separado para val y test, con la etiqueta de arriba):
    - Sharpe anualizado
    - Sortino
    - Max drawdown
@@ -96,7 +110,7 @@ Script `python/bot_ml/eval_supervised.py`:
    - PPO piloto (cuando esté)
    - Buy & hold BTC
 
-**Deliverable**: `eval_report.md` con tabla comparativa.
+**Deliverable**: `eval_report.md` con tabla comparativa, con la separación val/test explícita.
 
 ---
 

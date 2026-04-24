@@ -66,12 +66,21 @@ Un bot de trading de futuros cripto que:
 
 ## Qué NO cambia
 
-- El **feature engine v8** y el dataset Binance Futures UM. Son correctos.
-- El **pipeline de descarga y construcción de dataset** (`download_binance_history.py`, `convert_aggr_trades.py`, `BuildDataset`).
+- El **pipeline de descarga de histórico Binance Futures UM** (`download_binance_history.py`, `convert_aggr_trades.py`). Los raw zips siguen siendo la fuente.
 - La **infraestructura de servicios** (bot-server, policy_server, paper_dashboard).
 - El **regime_router** como capa de decisión superior.
 - La **GUI** y el monitoreo operativo.
 - El **gate de walk-forward** como criterio de aceptación de modelos.
+
+## Aclaración sobre el feature engine v8 (corrección)
+
+Una versión previa de este documento decía que "el feature engine v8 y el dataset son correctos" sin matizar. Eso inducía a error. La realidad:
+
+- El **feature engine v8** es reutilizable como base conceptual (multi-timeframe, órdenes de magnitud de features, schema versionado), pero **no** está materializado como tabla `f_0..f_199` en los `normalized_events.parquet` actuales — esos parquet contienen **eventos normalizados crudos** (`stream_name`, `event_type`, `price`, `best_bid`, `best_ask`, etc.), no observaciones listas para ML.
+- El **dataset histórico público** de Binance cubre bien `aggTrades`, `bookTicker` (top-of-book), `markPrice`, `fundingRate` y `metrics` (OI). **No cubre** `depthUpdate` en fidelidad completa, por lo que varias features de microestructura profunda del v8 live estarían con máscara o degradadas si se reprodujeran tal cual.
+- Por eso el pipeline supervisado nuevo **no intenta reconstruir las 200 dims v8**. Arma su propio set de features desde OHLCV 5m derivado de `aggTrades` + order flow agregado + funding + OI. Esto es deliberado y se justifica por honestidad de cobertura histórica: sólo entrenamos con lo que el histórico público realmente provee.
+
+Implicación práctica: la pipeline supervisada es **independiente del engine v8 actual** para el entrenamiento offline. En una fase posterior podríamos portar algunos features del v8 al pipeline supervisado, pero sólo aquellos que sean reconstruibles con fidelidad desde `aggTrades + bookTicker`.
 
 ## Camino del pivote (alto nivel)
 
