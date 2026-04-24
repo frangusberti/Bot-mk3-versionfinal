@@ -62,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pause-secs", type=float, default=1.0, help="Pause between generations")
     parser.add_argument("--start-gen", type=int, default=1, help="Starting generation number")
     parser.add_argument("--obs-dim", type=int, default=200, help="Expected observation dimension")
+    parser.add_argument("--max-consecutive-failures", type=int, default=3, help="Abort loop after this many failed generations in a row")
     parser.add_argument("--low-priority", action="store_true", help="Run child trainers with below-normal priority")
     return parser.parse_args()
 
@@ -368,6 +369,7 @@ def main() -> None:
     (run_root / "run_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     current_bootstrap = bootstrap
+    consecutive_failures = 0
     total_generations = range(args.start_gen, args.start_gen + args.generations)
     for generation in total_generations:
         record, current_bootstrap = run_generation(
@@ -386,6 +388,17 @@ def main() -> None:
             f"dd={record['max_dd']} wf={record['walkforward']}",
             flush=True,
         )
+        if record["status"] == "FAILED":
+            consecutive_failures += 1
+            if consecutive_failures >= max(1, args.max_consecutive_failures):
+                print(
+                    f"Abortando loop por {consecutive_failures} fallas consecutivas. "
+                    f"Revise {audit_md} y los logs de generacion.",
+                    flush=True,
+                )
+                break
+        else:
+            consecutive_failures = 0
         time.sleep(max(0.0, args.pause_secs))
 
     print(f"Loop completado. Auditoria: {audit_md}", flush=True)

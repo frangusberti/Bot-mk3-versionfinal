@@ -126,17 +126,30 @@ Se lanzo una tanda nueva de `500` generaciones sobre `BTCUSDT` con estos criteri
 - source de datasets: escaneo de filesystem
 - index efectivo usado por el runner: `index/__scan_fallback__.json`
 
-Run root del entrenamiento:
+Primer intento:
 
 - `python/runs_train/gen_v8_btc_500_20260424_0012`
+
+Ese primer intento detecto dos cosas utiles:
+
+- el bootstrap viejo era incompatible y fue descartado correctamente;
+- hubo fallas transitorias de gRPC contra el `RLService`, por lo que se agrego corte automatico por fallas consecutivas.
+
+Run root activo del entrenamiento relanzado:
+
+- `python/runs_train/gen_v8_btc_500_20260424_0020`
 
 Archivos importantes de seguimiento:
 
 - `python/runs_train/gen_v8_btc_500_20260424_0012/generation_audit.md`
 - `python/runs_train/gen_v8_btc_500_20260424_0012/generation_audit.jsonl`
 - `python/runs_train/gen_v8_btc_500_20260424_0012/logs/`
+- `python/runs_train/gen_v8_btc_500_20260424_0020/generation_audit.md`
+- `python/runs_train/gen_v8_btc_500_20260424_0020/generation_audit.jsonl`
+- `python/runs_train/gen_v8_btc_500_20260424_0020/logs/`
 
 Nota util:
 
 - el runner detecto que el index viejo no servia para episodios utiles y cayo correctamente al escaneo de datasets reales;
 - tambien detecto y descarto bootstrap viejo incompatible (`148` vs `200`), por lo que la tanda arranca limpia sobre el schema actual.
+- ademas, desde este punto el runner corta si acumula varias fallas seguidas, para no gastar generaciones enteras sobre un backend roto.
