@@ -10,9 +10,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import json
+
+import pandas as pd
+
 from .build_dataset import BuildConfig, build_dataset
 from .train import TrainConfig, train
-from .evaluate import EvalConfig, evaluate
+from .evaluate import evaluate_with_val_calibration
 
 
 DEFAULT_RUN_ROOT = Path(r"C:\Bot mk3\python\runs_train")
@@ -62,24 +66,38 @@ def main():
     else:
         print(f"[skip] train; expecting artifacts in {model_dir}")
 
-    print("=== EVALUATE ===")
+    print("=== EVALUATE (threshold calibrated on val, reported on test) ===")
     labeled_bars = model_dir / "labeled_bars.parquet"
-    for split in ["val", "test"]:
-        for mode in ["reg", "cls"]:
-            preds = model_dir / f"preds_{mode}_{split}.parquet"
-            if not preds.exists():
-                print(f"[eval] skipping {mode}/{split} — {preds} not found")
-                continue
-            evaluate(EvalConfig(
-                preds_parquet=preds,
-                labeled_bars_parquet=labeled_bars,
-                out_dir=eval_dir,
-                mode=mode,
-                threshold=0.0,
-                horizon=args.horizon,
-                split=split,
-            ))
+    bars = pd.read_parquet(labeled_bars)
+    all_results = {}
 
+    for mode in ["reg", "cls"]:
+        val_preds_path = model_dir / f"preds_{mode}_val.parquet"
+        test_preds_path = model_dir / f"preds_{mode}_test.parquet"
+        if not val_preds_path.exists() or not test_preds_path.exists():
+            print(f"[eval] skipping {mode} — preds not found")
+            continue
+        val_preds = pd.read_parquet(val_preds_path)
+        test_preds = pd.read_parquet(test_preds_path)
+        results = evaluate_with_val_calibration(
+            val_preds=val_preds,
+            test_preds=test_preds,
+            bars=bars,
+            mode=mode,
+            horizon=args.horizon,
+            out_dir=eval_dir,
+        )
+        all_results[mode] = results
+
+    # Summary table
+    print("\n=== SUMMARY (out-of-sample test) ===")
+    print(f"{'mode':<6} {'sharpe':>8} {'sortino':>8} {'ann_ret':>9} {'max_dd':>8} {'trades':>7} {'hit_rate':>9}")
+    for mode, res in all_results.items():
+        t = res["test"]
+        print(f"{mode:<6} {t['sharpe']:>8.3f} {t['sortino']:>8.3f} "
+              f"{t['annualized_return']:>8.1%} {t['max_drawdown']:>8.2%} "
+              f"{t['n_trades']:>7d} {t['hit_rate']:>8.1%}")
+    (eval_dir / "summary.json").write_text(json.dumps(all_results, indent=2))
     print(f"\nDone. Run dir: {run_dir}")
 
 

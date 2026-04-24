@@ -116,36 +116,110 @@ def simulate(
     }
 
 
+def _get_signals_and_fwd(preds: pd.DataFrame, bars: pd.DataFrame,
+                          mode: str, threshold: float, horizon: int):
+    if mode == "reg":
+        signals = signal_from_reg(preds, threshold)
+        fwd = preds["target"].to_numpy()
+    elif mode == "cls":
+        signals = signal_from_cls(preds, threshold)
+        fwd_col = f"fwd_ret_{horizon}"
+        if fwd_col not in bars.columns:
+            raise ValueError(f"{fwd_col} missing from labeled_bars parquet")
+        bars_c = bars.dropna(subset=[fwd_col]).reset_index(drop=True)
+        fwd = bars_c[fwd_col].to_numpy()[-len(preds):]
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+    return signals, fwd
+
+
+def calibrate_threshold(
+    preds_val: pd.DataFrame,
+    bars: pd.DataFrame,
+    mode: str,
+    horizon: int,
+    fee_taker: float,
+    slippage: float,
+    n_steps: int = 40,
+) -> tuple[float, dict]:
+    """Sweep thresholds on VAL; return (best_threshold, best_metrics).
+
+    Candidate thresholds are percentiles of |pred| so they adapt to the
+    prediction distribution rather than being a fixed grid.
+    """
+    if mode == "reg":
+        magnitudes = preds_val["pred"].abs()
+    else:
+        magnitudes = (preds_val["p_up"] - preds_val["p_down"]).abs()
+
+    percentiles = np.linspace(0, 95, n_steps)
+    candidates = [0.0] + [float(np.percentile(magnitudes, q)) for q in percentiles]
+    candidates = sorted(set(candidates))
+
+    best_thr, best_sharpe, best_metrics = 0.0, -np.inf, {}
+    for thr in candidates:
+        sigs, fwd = _get_signals_and_fwd(preds_val, bars, mode, thr, horizon)
+        if sigs.sum() == 0:
+            continue
+        m = simulate(sigs, fwd, fee_taker, slippage)
+        if m["sharpe"] > best_sharpe:
+            best_sharpe, best_thr, best_metrics = m["sharpe"], thr, m
+    return best_thr, best_metrics
+
+
 def evaluate(cfg: EvalConfig) -> dict:
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     preds = pd.read_parquet(cfg.preds_parquet)
     bars = pd.read_parquet(cfg.labeled_bars_parquet)
-    # Align preds to bars by position (preds were produced in the same order
-    # as the split after dropna). We instead recompute fwd returns directly on
-    # the preds frame using its `target` column, which for reg is fwd_ret.
-    if cfg.mode == "reg":
-        signals = signal_from_reg(preds, cfg.threshold)
-        fwd = preds["target"].to_numpy()  # fwd_ret_H
-    elif cfg.mode == "cls":
-        signals = signal_from_cls(preds, cfg.threshold)
-        # For classification we need actual forward return, not the class.
-        # Reconstruct from labeled_bars by pairing on length (same purge).
-        fwd_col = f"fwd_ret_{cfg.horizon}"
-        if fwd_col not in bars.columns:
-            raise ValueError(f"{fwd_col} missing from labeled_bars parquet")
-        # Drop NaNs similarly to training cleanup
-        bars_c = bars.dropna(subset=[fwd_col]).reset_index(drop=True)
-        # Take the tail matching preds length (they were produced after dropna)
-        fwd = bars_c[fwd_col].to_numpy()[-len(preds):]
-    else:
-        raise ValueError(f"Unknown mode: {cfg.mode}")
-
+    signals, fwd = _get_signals_and_fwd(preds, bars, cfg.mode, cfg.threshold, cfg.horizon)
     metrics = simulate(signals, fwd, cfg.fee_taker, cfg.slippage)
+    metrics["threshold_used"] = cfg.threshold
+    metrics["split"] = cfg.split
     metrics["config"] = cfg.to_dict()
     out = cfg.out_dir / f"metrics_{cfg.mode}_{cfg.split}.json"
     out.write_text(json.dumps(metrics, indent=2))
-    print(f"[eval] {cfg.split}/{cfg.mode}: {metrics}")
+    print(f"[eval] {cfg.split}/{cfg.mode} thr={cfg.threshold:.6f}: "
+          f"sharpe={metrics['sharpe']:.3f} dd={metrics['max_drawdown']:.3f} "
+          f"trades={metrics['n_trades']}")
     return metrics
+
+
+def evaluate_with_val_calibration(
+    val_preds: pd.DataFrame,
+    test_preds: pd.DataFrame,
+    bars: pd.DataFrame,
+    mode: str,
+    horizon: int,
+    out_dir: Path,
+    fee_taker: float = FEE_TAKER,
+    slippage: float = SLIPPAGE,
+) -> dict:
+    """Calibrate threshold on val, report on test. Returns combined result dict."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[eval] calibrating threshold on val ({mode})…")
+    best_thr, val_metrics = calibrate_threshold(
+        val_preds, bars, mode, horizon, fee_taker, slippage
+    )
+    val_metrics["threshold_used"] = best_thr
+    val_metrics["split"] = "val_calibration"
+    (out_dir / f"metrics_{mode}_val_calibration.json").write_text(
+        json.dumps(val_metrics, indent=2)
+    )
+    print(f"[eval] best threshold={best_thr:.6f} (val sharpe={val_metrics.get('sharpe', 0):.3f})")
+
+    print(f"[eval] evaluating test with fixed threshold ({mode})…")
+    test_sigs, test_fwd = _get_signals_and_fwd(test_preds, bars, mode, best_thr, horizon)
+    test_metrics = simulate(test_sigs, test_fwd, fee_taker, slippage)
+    test_metrics["threshold_used"] = best_thr
+    test_metrics["split"] = "test_out_of_sample"
+    (out_dir / f"metrics_{mode}_test.json").write_text(
+        json.dumps(test_metrics, indent=2)
+    )
+    print(f"[eval] test/{mode}: sharpe={test_metrics['sharpe']:.3f} "
+          f"ann_ret={test_metrics['annualized_return']:.2%} "
+          f"dd={test_metrics['max_drawdown']:.2%} "
+          f"trades={test_metrics['n_trades']}")
+    return {"val": val_metrics, "test": test_metrics, "best_threshold": best_thr}
 
 
 def main():
