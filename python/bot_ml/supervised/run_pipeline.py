@@ -91,12 +91,16 @@ def main():
 
     # Summary table
     print("\n=== SUMMARY (out-of-sample test) ===")
-    print(f"{'mode':<6} {'sharpe':>8} {'sortino':>8} {'ann_ret':>9} {'max_dd':>8} {'trades':>7} {'hit_rate':>9}")
+    print(f"{'strategy':<16} {'sharpe':>8} {'sortino':>8} {'ann_ret':>9} {'max_dd':>8} {'trades':>7} {'hit_rate':>9}")
     for mode, res in all_results.items():
         t = res["test"]
-        print(f"{mode:<6} {t['sharpe']:>8.3f} {t['sortino']:>8.3f} "
+        print(f"{mode:<16} {t['sharpe']:>8.3f} {t['sortino']:>8.3f} "
               f"{t['annualized_return']:>8.1%} {t['max_drawdown']:>8.2%} "
               f"{t['n_trades']:>7d} {t['hit_rate']:>8.1%}")
+        if "buy_and_hold" in res:
+            b = res["buy_and_hold"]
+            print(f"{'buy_and_hold':<16} {b['sharpe']:>8.3f} {'N/A':>8} "
+                  f"{b['annualized_return']:>8.1%} {b['max_drawdown']:>8.2%} {'N/A':>7} {'N/A':>9}")
     (eval_dir / "summary.json").write_text(json.dumps(all_results, indent=2))
     print(f"\nDone. Run dir: {run_dir}")
 

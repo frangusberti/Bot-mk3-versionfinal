@@ -95,11 +95,13 @@ def train_regression(tr, va, te, feat, target, params_extra, cfg: TrainConfig):
         "objective": "regression",
         "metric": "rmse",
         "learning_rate": 0.02,
-        "num_leaves": 31,
-        "min_data_in_leaf": 200,
+        "num_leaves": 63,
+        "min_data_in_leaf": 100,
         "feature_fraction": 0.7,
-        "bagging_fraction": 0.7,
+        "bagging_fraction": 0.8,
         "bagging_freq": 5,
+        "lambda_l1": 0.1,
+        "lambda_l2": 1.0,
         "verbose": -1,
     }
     params.update(params_extra or {})
@@ -142,11 +144,13 @@ def train_classification(tr, va, te, feat, target, cfg: TrainConfig):
         "num_class": 3,
         "metric": "multi_logloss",
         "learning_rate": 0.02,
-        "num_leaves": 31,
-        "min_data_in_leaf": 200,
+        "num_leaves": 63,
+        "min_data_in_leaf": 100,
         "feature_fraction": 0.7,
-        "bagging_fraction": 0.7,
+        "bagging_fraction": 0.8,
         "bagging_freq": 5,
+        "lambda_l1": 0.1,
+        "lambda_l2": 1.0,
         "verbose": -1,
     }
     model = lgb.train(
@@ -216,11 +220,22 @@ def train(cfg: TrainConfig):
     }).sort_values("gain_reg", ascending=False)
     fi.to_csv(cfg.out_dir / "feature_importance.csv", index=False)
 
+    # IC (Information Coefficient) — Spearman rank correlation of pred vs actual
+    ic_stats = {}
+    for split_name, split_preds in reg_preds.items():
+        if len(split_preds) < 10:
+            continue
+        ic = float(split_preds[["pred", "target"]].corr(method="spearman").iloc[0, 1])
+        ic_stats[f"ic_spearman_{split_name}"] = round(ic, 4)
+        # IC > 0.05 is considered meaningful in practice
+    print(f"[train] IC stats: {ic_stats}")
+
     manifest = {
         "config": cfg.to_dict(),
         "features": feat,
         "regression_best_iter": reg_model.best_iteration,
         "classification_best_iter": cls_model.best_iteration,
+        **ic_stats,
     }
     (cfg.out_dir / "train_manifest.json").write_text(json.dumps(manifest, indent=2))
 

@@ -184,6 +184,27 @@ def evaluate(cfg: EvalConfig) -> dict:
     return metrics
 
 
+def buy_and_hold_metrics(fwd_rets: np.ndarray) -> dict:
+    """Baseline: always long, no fees (best case for buy-and-hold comparison)."""
+    n = len(fwd_rets)
+    equity = np.cumprod(1.0 + fwd_rets)
+    peak = np.maximum.accumulate(equity)
+    dd = equity / peak - 1.0
+    total_ret = float(equity[-1] - 1.0) if n else 0.0
+    years = n / BARS_PER_YEAR
+    ann_ret = (1.0 + total_ret) ** (1.0 / years) - 1.0 if years > 0 else 0.0
+    mean_r = float(fwd_rets.mean())
+    std_r = float(fwd_rets.std(ddof=1)) if n > 1 else 0.0
+    sharpe = (mean_r / std_r) * np.sqrt(BARS_PER_YEAR) if std_r > 0 else 0.0
+    return {
+        "strategy": "buy_and_hold",
+        "total_return": round(total_ret, 4),
+        "annualized_return": round(float(ann_ret), 4),
+        "sharpe": round(float(sharpe), 3),
+        "max_drawdown": round(float(dd.min()), 4),
+    }
+
+
 def evaluate_with_val_calibration(
     val_preds: pd.DataFrame,
     test_preds: pd.DataFrame,
@@ -219,7 +240,18 @@ def evaluate_with_val_calibration(
           f"ann_ret={test_metrics['annualized_return']:.2%} "
           f"dd={test_metrics['max_drawdown']:.2%} "
           f"trades={test_metrics['n_trades']}")
-    return {"val": val_metrics, "test": test_metrics, "best_threshold": best_thr}
+
+    # Buy-and-hold benchmark (uses same fwd_rets as test)
+    test_sigs_bh = np.ones(len(test_preds), dtype=np.int8)
+    _, test_fwd_bh = _get_signals_and_fwd(test_preds, bars, mode, 0.0, horizon)
+    # For bh we just use the raw fwd returns without fee (theoretical best case)
+    bh = buy_and_hold_metrics(test_fwd_bh)
+    (out_dir / f"metrics_{mode}_buy_and_hold.json").write_text(json.dumps(bh, indent=2))
+    print(f"[eval] buy_and_hold benchmark: sharpe={bh['sharpe']:.3f} "
+          f"ann_ret={bh['annualized_return']:.2%} dd={bh['max_drawdown']:.2%}")
+
+    return {"val": val_metrics, "test": test_metrics, "best_threshold": best_thr,
+            "buy_and_hold": bh}
 
 
 def main():

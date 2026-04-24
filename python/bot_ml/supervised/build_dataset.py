@@ -234,11 +234,36 @@ def add_features(bars: pd.DataFrame) -> pd.DataFrame:
         df[f"vol_z_{w}"] = (df["volume"] - vmean) / vstd.replace(0.0, np.nan)
 
     # Higher timeframe context (resample-align)
-    for tf_bars, tag in [(3, "15m"), (12, "1h"), (48, "4h")]:
+    for tf_bars, tag in [(3, "15m"), (12, "1h"), (48, "4h"), (288, "1d")]:
         df[f"ret_{tag}"] = np.log(c / c.shift(tf_bars))
         df[f"rv_{tag}"] = df["ret_1"].rolling(tf_bars).std() * np.sqrt(tf_bars)
         ema_hf = c.ewm(span=tf_bars * 3, adjust=False).mean()
         df[f"slope_{tag}"] = (c - ema_hf) / ema_hf
+
+    # Long-window features — important for 4h+ horizon prediction
+    # Trend strength: how far price is from its slow mean
+    for span in [288, 576, 2016]:   # 1d, 2d, 7d in 5m bars
+        ema = c.ewm(span=span, adjust=False).mean()
+        df[f"price_vs_ema_{span}"] = (c - ema) / ema
+
+    # Rolling max drawdown from peak (captures regime exhaustion)
+    for w in [288, 2016]:  # 1d, 7d
+        roll_max = c.rolling(w).max()
+        df[f"dd_from_peak_{w}"] = (c - roll_max) / roll_max
+
+    # Realized volatility at longer horizons
+    for w in [288, 576, 2016]:
+        df[f"rv_{w}"] = r1.rolling(w).std()
+
+    # RSI at longer period
+    df["rsi_96"] = _rsi(c, 96)
+
+    # OI change at longer horizon (if available)
+    if "open_interest" in df.columns:
+        df["oi_ret_288"] = np.log(df["open_interest"] / df["open_interest"].shift(288))
+
+    # Funding rate cumulative (sum over last 3 funding periods ≈ 24h)
+    df["funding_cumsum_48"] = df["funding_rate"].rolling(48, min_periods=1).sum()
 
     return df
 
